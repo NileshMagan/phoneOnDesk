@@ -3,26 +3,51 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Printer Cam – Phone</title>
+<title>phoneOnDesk</title>
 <style>
   body { margin: 0; background: #111; color: #eee; font: 16px system-ui, sans-serif; text-align: center; }
-  video { width: 100%; max-height: 70vh; background: #000; }
-  button { font-size: 20px; padding: 14px 28px; margin: 16px; border-radius: 12px; border: 0; background: #2d7ff9; color: #fff; }
+  video { width: 100%; max-height: 55vh; background: #000; }
+  button { font-size: 18px; padding: 12px 22px; margin: 8px; border-radius: 12px; border: 0; background: #2d7ff9; color: #fff; }
+  button.alt { background: #2a2a2e; }
   select { font-size: 16px; padding: 6px; }
   #info { opacity: .8; padding: 0 16px; }
+  .clip { margin: 12px 16px; padding: 12px 14px; background: #1b1b1f; border: 1px solid #2a2a2e; border-radius: 12px; text-align: left; }
+  .clip h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; opacity: .6; margin: 0 0 8px; }
+  .clip pre { white-space: pre-wrap; word-break: break-word; font: 15px system-ui, sans-serif; margin: 0 0 8px; max-height: 30vh; overflow: auto; }
+  .clip button { margin: 4px 8px 0 0; font-size: 16px; padding: 10px 16px; }
+  textarea { width: 100%; box-sizing: border-box; font: 15px system-ui, sans-serif; background: #111; color: #eee; border: 1px solid #333; border-radius: 8px; padding: 8px; }
+  .muted { opacity: .6; font-size: 13px; }
 </style>
 </head>
 <body>
 <video id="v" playsinline muted autoplay></video>
 <div>
   <button id="go">Start streaming</button>
-  <label>Quality <select id="q">
+  <label>Speed <select id="q">
     <option value="1">1 fps</option>
     <option value="2" selected>2 fps</option>
     <option value="5">5 fps</option>
   </select></label>
 </div>
-<p id="info">Point the camera at the printer, then tap Start. Keep this tab open.</p>
+<p id="info">Point the camera at what you want to watch, then tap Start. Keep this tab open in front.</p>
+
+<div class="clip">
+  <h2>From Mac</h2>
+  <pre id="fromMac" class="muted">Nothing yet. On the Mac, press ⌘V on the phoneOnDesk page to send text here.</pre>
+  <button id="copyMac" class="alt" hidden>Copy</button>
+</div>
+
+<div class="clip">
+  <h2>To Mac</h2>
+  <button id="sendClip">Send my clipboard</button>
+  <div id="manual" hidden>
+    <p class="muted">Chrome didn't allow clipboard access. Paste here instead:</p>
+    <textarea id="manualText" rows="3"></textarea>
+    <button id="sendManual">Send</button>
+  </div>
+  <p class="muted" id="clipInfo"></p>
+</div>
+
 <script>
 const v = document.getElementById('v');
 const info = document.getElementById('info');
@@ -32,17 +57,28 @@ let battery = null, running = false, sent = 0, wakeLock = null;
 async function lockScreen() {
   try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
-document.addEventListener('visibilitychange', () => {
-  if (running && document.visibilityState === 'visible') lockScreen();
-});
 
-async function start() {
-  const stream = await navigator.mediaDevices.getUserMedia({
+async function openCamera() {
+  v.srcObject?.getTracks().forEach((t) => t.stop());
+  v.srcObject = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false,
   });
-  v.srcObject = stream;
   await v.play();
+}
+
+// Android stops the camera while another app is in front. Pick it back up on return.
+document.addEventListener('visibilitychange', async () => {
+  if (!running || document.visibilityState !== 'visible') return;
+  lockScreen();
+  const track = v.srcObject?.getVideoTracks()[0];
+  if (!track || track.readyState === 'ended' || track.muted) {
+    try { await openCamera(); } catch (e) { info.textContent = 'Camera error: ' + e.message; }
+  }
+});
+
+async function start() {
+  await openCamera();
   try { battery = await navigator.getBattery(); } catch {}
   await lockScreen();
   running = true;
@@ -55,7 +91,7 @@ async function loop() {
     const t0 = Date.now();
     const w = Math.min(v.videoWidth, 1280);
     const h = Math.round(v.videoHeight * (w / v.videoWidth));
-    if (w && h) {
+    if (w && h && document.visibilityState === 'visible') {
       canvas.width = w; canvas.height = h;
       canvas.getContext('2d').drawImage(v, 0, 0, w, h);
       const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.7));
@@ -69,7 +105,7 @@ async function loop() {
         sent++;
         info.textContent = `Sent ${sent} frames` + (battery ? ` · battery ${Math.round(battery.level * 100)}%` : '');
       } catch (e) {
-        info.textContent = 'Can\'t reach the Mac. Is the Printer Cam app open there? Retrying…';
+        info.textContent = 'Can\'t reach the Mac. Is the phoneOnDesk app open there? Retrying…';
       }
     }
     const fps = Number(document.getElementById('q').value);
@@ -80,6 +116,59 @@ async function loop() {
 document.getElementById('go').onclick = () => {
   if (!running) start().catch((e) => (info.textContent = 'Camera error: ' + e.message));
 };
+
+// Clipboard
+const clipInfo = document.getElementById('clipInfo');
+let macText = '', macAt = 0;
+
+async function sendToMac(text) {
+  if (!text) { clipInfo.textContent = 'Clipboard is empty.'; return; }
+  const r = await fetch('/clip?to=mac', { method: 'POST', body: text });
+  clipInfo.textContent = r.ok ? `Sent ${text.length} characters to the Mac ✓` : 'Send failed.';
+}
+
+document.getElementById('sendClip').onclick = async () => {
+  try {
+    await sendToMac(await navigator.clipboard.readText());
+  } catch {
+    document.getElementById('manual').hidden = false;
+    document.getElementById('manualText').focus();
+  }
+};
+document.getElementById('sendManual').onclick = async () => {
+  const t = document.getElementById('manualText');
+  await sendToMac(t.value);
+  t.value = '';
+};
+
+document.getElementById('copyMac').onclick = async (e) => {
+  try {
+    await navigator.clipboard.writeText(macText);
+    e.target.textContent = 'Copied ✓';
+  } catch {
+    // Fall back to selecting the text so a long-press copy is one step away.
+    getSelection().selectAllChildren(document.getElementById('fromMac'));
+    e.target.textContent = 'Selected, long-press to copy';
+  }
+  setTimeout(() => (e.target.textContent = 'Copy'), 2500);
+};
+
+async function pollClip() {
+  try {
+    const { toPhone } = await (await fetch('/clip')).json();
+    if (toPhone.at && toPhone.at !== macAt) {
+      macAt = toPhone.at;
+      macText = toPhone.text;
+      const pre = document.getElementById('fromMac');
+      pre.textContent = macText;
+      pre.classList.remove('muted');
+      document.getElementById('copyMac').hidden = false;
+      if (navigator.vibrate) navigator.vibrate(60);
+    }
+  } catch {}
+}
+pollClip();
+setInterval(pollClip, 2000);
 </script>
 </body>
 </html>

@@ -3,55 +3,70 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Printer Cam</title>
+<title>phoneOnDesk</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0c; color: #eee; font: 15px system-ui, sans-serif; }
   #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
   img#img { max-width: 100%; max-height: 100%; object-fit: contain; }
-  #bar { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items: center; }
+  #bar { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items: center; z-index: 5; flex-wrap: wrap; }
   .pill { background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 999px; backdrop-filter: blur(6px); }
   .low { color: #ff6b6b; }
   .stale { color: #ffb347; }
   .spacer { flex: 1; }
   button { font: inherit; color: #eee; background: rgba(0,0,0,.6); border: 1px solid #333; border-radius: 999px; padding: 6px 14px; cursor: pointer; }
   button:hover { border-color: #666; }
-  #setup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,5,6,.85); padding: 16px; }
-  #setup[hidden] { display: none; }
-  .card { background: #17171a; border: 1px solid #2a2a2e; border-radius: 16px; padding: 24px 28px; max-width: 720px; width: 100%; display: flex; gap: 28px; flex-wrap: wrap; position: relative; }
+  button.primary { background: #2d7ff9; border-color: #2d7ff9; color: #fff; }
+  button.dot::after { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #2d7ff9; margin-left: 6px; vertical-align: middle; }
+  .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,5,6,.85); padding: 16px; z-index: 10; }
+  .overlay[hidden] { display: none; }
+  .card { background: #17171a; border: 1px solid #2a2a2e; border-radius: 16px; padding: 24px 28px; max-width: 720px; width: 100%; display: flex; gap: 28px; flex-wrap: wrap; position: relative; max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; }
   .card h1 { font-size: 20px; margin: 0 0 12px; }
   .card ol { margin: 0; padding-left: 20px; line-height: 1.6; }
   .card li { margin-bottom: 6px; }
-  .card code { background: #24242a; padding: 2px 6px; border-radius: 6px; font-size: 13px; word-break: break-all; }
-  .card .muted { opacity: .65; font-size: 13px; margin-top: 12px; line-height: 1.5; }
+  code { background: #24242a; padding: 2px 6px; border-radius: 6px; font-size: 13px; word-break: break-all; }
+  .muted { opacity: .65; font-size: 13px; margin-top: 12px; line-height: 1.5; }
   #qr { background: #fff; padding: 12px; border-radius: 12px; align-self: flex-start; }
   #qr img, #qr canvas { display: block; }
   .steps { flex: 1; min-width: 260px; }
-  #close { position: absolute; top: 12px; right: 12px; }
-  #stopped { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: #0b0b0c; font-size: 18px; opacity: .8; text-align: center; padding: 16px; }
+  .x { position: absolute; top: 12px; right: 12px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  input { font: inherit; color: #eee; background: #0f0f11; border: 1px solid #333; border-radius: 8px; padding: 6px 10px; }
+  #devState { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; background: #202026; }
+  #side { position: fixed; top: 56px; right: 12px; bottom: 12px; width: 340px; max-width: calc(100vw - 24px); background: #17171a; border: 1px solid #2a2a2e; border-radius: 14px; padding: 16px; z-index: 6; display: flex; flex-direction: column; gap: 10px; box-sizing: border-box; overflow: auto; }
+  #side[hidden] { display: none; }
+  #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 6px 0 0; }
+  #side pre { white-space: pre-wrap; word-break: break-word; font: 14px system-ui, sans-serif; margin: 0; background: #0f0f11; border-radius: 8px; padding: 10px; max-height: 30vh; overflow: auto; }
+  #side textarea { font: 14px system-ui, sans-serif; color: #eee; background: #0f0f11; border: 1px solid #333; border-radius: 8px; padding: 10px; resize: vertical; min-height: 80px; }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #24242a; border: 1px solid #333; padding: 10px 16px; border-radius: 10px; z-index: 20; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  #stopped { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: #0b0b0c; font-size: 18px; opacity: .8; text-align: center; padding: 16px; z-index: 30; }
 </style>
 </head>
 <body>
-<div id="wrap"><img id="img" alt="Printer camera"></div>
+<div id="wrap"><img id="img" alt="Phone camera"></div>
 
 <div id="bar">
   <span class="pill" id="bat">🔋 –</span>
   <span class="pill" id="age">waiting for phone</span>
   <span class="spacer"></span>
+  <button id="clipBtn">Clipboard</button>
+  <button id="screenBtn">Phone screen</button>
   <button id="help">Phone setup</button>
   <button id="stop" title="Stops the server; also happens on its own ~20s after you close this tab">Stop</button>
 </div>
 
-<div id="setup">
+<!-- Camera setup -->
+<div id="setup" class="overlay">
   <div class="card">
-    <button id="close">Close</button>
+    <button class="x" data-close="setup">Close</button>
     <div id="qr"></div>
     <div class="steps">
       <h1>Connect your phone</h1>
       <ol>
         <li>Phone on the same Wi‑Fi as this Mac. Scan the QR code with the camera app, or open <code id="named"></code> in Chrome.</li>
         <li>First time only: Chrome shows a security warning. Tap <b>Advanced → Proceed</b>. It's this Mac's own certificate.</li>
-        <li>Allow the camera, point it at the printer, tap <b>Start streaming</b>. Keep the phone plugged in.</li>
+        <li>Allow the camera, point it at what you want to watch, tap <b>Start streaming</b>. Keep the phone plugged in.</li>
         <li>Tip: in Chrome's ⋮ menu choose <b>Add to Home screen</b> so it's one tap next time.</li>
       </ol>
       <div class="muted" id="alts"></div>
@@ -60,43 +75,210 @@
   </div>
 </div>
 
-<div id="stopped">Printer Cam stopped.<br>Open the Printer Cam app again to restart.</div>
+<!-- Phone screen pairing -->
+<div id="screen" class="overlay" hidden>
+  <div class="card">
+    <button class="x" data-close="screen">Close</button>
+    <div class="steps">
+      <h1>See and control the phone screen</h1>
+      <div id="devState">Checking…</div>
+      <div id="pairSteps">
+        <p style="margin:0 0 10px">One-time setup on the phone:</p>
+        <ol>
+          <li>Turn on Developer options: <b>Settings → About phone</b>, tap <b>Build number</b> 7 times. On Samsung it's under <b>Software information</b>.</li>
+          <li>Go to <b>Settings → System → Developer options</b> and turn on <b>Wireless debugging</b>.</li>
+          <li>Tap <b>Wireless debugging → Pair device with pairing code</b>. Type what it shows here:
+            <div class="row">
+              <input id="pairTarget" placeholder="IP address & port, e.g. 192.168.1.20:37123" size="30">
+              <input id="pairCode" placeholder="6-digit code" size="10" inputmode="numeric">
+              <button class="primary" id="pairBtn">Pair</button>
+            </div>
+          </li>
+          <li>It usually connects by itself a few seconds later. If not, type the <b>IP address & port</b> from the main Wireless debugging screen. It's a different port from the pairing one.
+            <div class="row">
+              <input id="connTarget" placeholder="e.g. 192.168.1.20:41235" size="30">
+              <button id="connBtn">Connect</button>
+            </div>
+          </li>
+        </ol>
+        <div class="muted" id="adbOut"></div>
+        <div class="muted">A USB cable works too: plug in, then tap <b>Allow USB debugging</b> on the phone.</div>
+      </div>
+      <div class="muted">
+        The screen opens in its own window. Click to tap, scroll to swipe, and type with your keyboard. ⌘C / ⌘V share the clipboard both ways while it's open.<br>
+        The camera pauses while another app is in front on the phone, and picks up again when you go back to the phoneOnDesk tab.<br>
+        Wireless debugging turns off if the phone restarts or changes Wi‑Fi. Turn it back on and it reconnects without pairing again.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Clipboard -->
+<aside id="side" hidden>
+  <div style="display:flex;align-items:center"><b style="flex:1">Clipboard</b><button data-close="side">Close</button></div>
+  <h2>From phone</h2>
+  <pre id="fromPhone" class="muted" style="opacity:.6">Nothing yet. Tap “Send my clipboard” on the phone.</pre>
+  <div class="row" style="margin:0"><button id="copyPhone" hidden>Copy to Mac</button><span class="muted" id="phoneAt" style="margin:0;align-self:center"></span></div>
+  <h2>To phone</h2>
+  <textarea id="toPhone" placeholder="Type or paste here…"></textarea>
+  <div class="row" style="margin:0"><button class="primary" id="sendPhone">Send to phone</button></div>
+  <div class="muted" style="margin:0">Shortcut: press ⌘V anywhere on this page to send your Mac clipboard straight to the phone.</div>
+</aside>
+
+<div id="toast"></div>
+<div id="stopped">phoneOnDesk stopped.<br>Open the phoneOnDesk app again to restart.</div>
 
 <script>
-const img = document.getElementById('img');
-const setup = document.getElementById('setup');
+const $ = (id) => document.getElementById(id);
+const img = $('img');
+const setup = $('setup');
 let gotFrame = false, dismissed = false, stopped = false;
 
-img.src = '/stream';
-img.onerror = () => { if (!stopped) setTimeout(() => (img.src = '/stream?' + Date.now()), 2000); };
+function toast(msg) {
+  $('toast').textContent = msg;
+  $('toast').classList.add('show');
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => $('toast').classList.remove('show'), 2500);
+}
 
-document.getElementById('help').onclick = () => { setup.hidden = false; };
-document.getElementById('close').onclick = () => { setup.hidden = true; dismissed = true; };
-document.getElementById('stop').onclick = async () => {
+// Each new frame arrives as a ping; fetch it off-screen, then swap it in so there's no flicker.
+const events = new EventSource('/events');
+let loading = false, pendingAt = null, shownUrl = null;
+events.onmessage = (e) => showFrame(e.data);
+async function showFrame(at) {
+  if (loading) { pendingAt = at; return; }
+  loading = true;
+  try {
+    const r = await fetch('/snapshot.jpg?t=' + at);
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      img.src = url;
+      if (shownUrl) URL.revokeObjectURL(shownUrl);
+      shownUrl = url;
+    }
+  } catch {}
+  loading = false;
+  if (pendingAt) { const next = pendingAt; pendingAt = null; showFrame(next); }
+}
+
+document.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => {
+  $(b.dataset.close).hidden = true;
+  if (b.dataset.close === 'setup') dismissed = true;
+}));
+$('help').onclick = () => { setup.hidden = false; };
+$('stop').onclick = async () => {
   stopped = true;
   try { await fetch('/quit', { method: 'POST' }); } catch {}
-  document.getElementById('stopped').style.display = 'flex';
-  img.removeAttribute('src');
+  events.close();
+  $('stopped').style.display = 'flex';
 };
 
 fetch('/info').then((r) => r.json()).then(({ phoneUrls }) => {
   // QR uses the IP address: it's the most reliable on Android. The .local name is the bookmarkable one.
   const primary = phoneUrls.lan[0] || phoneUrls.tailscale[0] || phoneUrls.named;
-  document.getElementById('named').textContent = phoneUrls.named || primary;
-  if (window.QRCode) new QRCode(document.getElementById('qr'), { text: primary, width: 200, height: 200 });
-  else document.getElementById('qr').style.display = 'none';
+  $('named').textContent = phoneUrls.named || primary;
+  if (window.QRCode) new QRCode($('qr'), { text: primary, width: 200, height: 200 });
+  else $('qr').style.display = 'none';
   const alts = [];
   if (phoneUrls.lan.length) alts.push(`If the name doesn't load on your phone, use <code>${phoneUrls.lan[0]}</code>.`);
   if (phoneUrls.tailscale.length) alts.push(`Away from home with Tailscale on the phone: <code>${phoneUrls.tailscale[0]}</code>`);
-  document.getElementById('alts').innerHTML = alts.join('<br>');
+  $('alts').innerHTML = alts.join('<br>');
 });
 
+// ---------- Clipboard ----------
+let phoneClipAt = 0, phoneClip = '';
+$('clipBtn').onclick = () => { $('side').hidden = !$('side').hidden; $('clipBtn').classList.remove('dot'); };
+
+async function copyToMac(text, quiet) {
+  try { await navigator.clipboard.writeText(text); toast('Phone clipboard copied to your Mac'); return true; }
+  catch { if (!quiet) toast('Click “Copy to Mac” to copy it'); return false; }
+}
+$('copyPhone').onclick = () => copyToMac(phoneClip);
+
+async function sendToPhone(text) {
+  if (!text) return;
+  const r = await fetch('/clip?to=phone', { method: 'POST', body: text });
+  toast(r.ok ? 'Sent to phone ✓' : 'Send failed');
+}
+$('sendPhone').onclick = async () => { await sendToPhone($('toPhone').value); $('toPhone').value = ''; };
+document.addEventListener('paste', (e) => {
+  if (e.target.closest('textarea, input')) return;
+  const text = e.clipboardData.getData('text');
+  if (text) { e.preventDefault(); sendToPhone(text); }
+});
+
+async function pollClip() {
+  const { toMac } = await (await fetch('/clip')).json();
+  if (!toMac.at || toMac.at === phoneClipAt) return;
+  const first = phoneClipAt === 0;
+  phoneClipAt = toMac.at;
+  phoneClip = toMac.text;
+  $('fromPhone').textContent = phoneClip;
+  $('fromPhone').style.opacity = 1;
+  $('copyPhone').hidden = false;
+  $('phoneAt').textContent = new Date(toMac.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (first && Date.now() - toMac.at > 10_000) return; // Old text from before this tab opened.
+  const copied = document.hasFocus() && await copyToMac(phoneClip, true);
+  if (!copied && $('side').hidden) $('clipBtn').classList.add('dot');
+  if (!copied) toast('Text arrived from your phone');
+}
+
+// ---------- Phone screen ----------
+async function adbState() {
+  const r = await fetch('/adb');
+  return r.json();
+}
+function renderDev(s) {
+  const el = $('devState');
+  if (!s.tools) {
+    el.innerHTML = 'Needs scrcpy on this Mac. In Terminal run <code>brew install scrcpy</code>, then reopen this.';
+    $('pairSteps').hidden = true;
+    return null;
+  }
+  const ready = s.devices.find((d) => d.state === 'device');
+  const waiting = s.devices.find((d) => d.state === 'unauthorized');
+  $('pairSteps').hidden = !!ready;
+  if (ready) {
+    el.innerHTML = `Connected: <b>${ready.model}</b> &nbsp; <button class="primary" id="openScreen">${s.screenOpen ? 'Screen is open' : 'Open screen'}</button>`;
+    $('openScreen').onclick = openScreen;
+  } else if (waiting) {
+    el.textContent = 'Check the phone and tap Allow on the debugging prompt.';
+  } else {
+    el.textContent = 'No phone connected yet.';
+  }
+  return ready;
+}
+async function openScreen() {
+  const r = await (await fetch('/screen', { method: 'POST' })).json();
+  toast(r.out);
+  if (r.ok) $('screen').hidden = true;
+  return r.ok;
+}
+$('screenBtn').onclick = async () => {
+  const s = await adbState();
+  if (s.tools && s.devices.some((d) => d.state === 'device')) {
+    if (await openScreen()) return;
+  }
+  renderDev(s);
+  $('screen').hidden = false;
+};
+async function adbAction(path, body) {
+  $('adbOut').textContent = 'Working…';
+  const r = await (await fetch(path, { method: 'POST', body: JSON.stringify(body) })).json();
+  $('adbOut').textContent = r.out;
+  renderDev(await adbState());
+}
+$('pairBtn').onclick = () => adbAction('/adb/pair', { target: $('pairTarget').value.trim(), code: $('pairCode').value.trim() });
+$('connBtn').onclick = () => adbAction('/adb/connect', { target: $('connTarget').value.trim() });
+setInterval(async () => { if (!$('screen').hidden) renderDev(await adbState()); }, 3000);
+
+// ---------- Camera status ----------
 async function poll() {
   if (stopped) return;
   try {
     const s = await (await fetch('/status')).json();
-    const bat = document.getElementById('bat');
-    const age = document.getElementById('age');
+    const bat = $('bat');
+    const age = $('age');
     if (s.at && !gotFrame) { gotFrame = true; if (!dismissed) setup.hidden = true; }
     if (!s.at && !dismissed) setup.hidden = false;
     if (s.level != null) {
@@ -107,12 +289,10 @@ async function poll() {
       const sec = Math.round(s.ageMs / 1000);
       age.textContent = sec < 5 ? '● live' : `last frame ${sec < 60 ? sec + 's' : Math.round(sec / 60) + 'm'} ago`;
       age.className = 'pill' + (sec >= 5 ? ' stale' : '');
-      // Reconnect the stream if it went stale but frames are flowing again.
-      if (sec < 5 && img.dataset.stale) { delete img.dataset.stale; img.src = '/stream?' + Date.now(); }
-      if (sec >= 10) img.dataset.stale = '1';
     }
+    await pollClip();
   } catch {
-    document.getElementById('stopped').style.display = 'flex';
+    $('stopped').style.display = 'flex';
   }
 }
 poll();

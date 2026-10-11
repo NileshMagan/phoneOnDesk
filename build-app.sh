@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds "Printer Cam.app" into ~/Applications. Re-run after moving this folder or changing Node.
+# Builds "phoneOnDesk.app" into ~/Applications. Re-run after moving this folder or changing Node.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 NODE="$(command -v node)"
-APP="$HOME/Applications/Printer Cam.app"
+APP="$HOME/Applications/phoneOnDesk.app"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -14,10 +14,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Printer Cam</string>
-  <key>CFBundleDisplayName</key><string>Printer Cam</string>
+  <key>CFBundleName</key><string>phoneOnDesk</string>
+  <key>CFBundleDisplayName</key><string>phoneOnDesk</string>
   <key>CFBundleIdentifier</key><string>app.phoneondesk</string>
-  <key>CFBundleExecutable</key><string>printer-cam</string>
+  <key>CFBundleExecutable</key><string>phoneondesk</string>
   <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -25,10 +25,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cat > "$APP/Contents/MacOS/printer-cam" <<LAUNCHER
+cat > "$APP/Contents/MacOS/phoneondesk" <<LAUNCHER
 #!/bin/bash
 # Start the server unless it's already up, then open the viewer.
-LOG="\$HOME/Library/Logs/printer-cam.log"
+LOG="\$HOME/Library/Logs/phoneondesk.log"
 if ! curl -sf http://localhost:8080/status >/dev/null; then
   nohup "$NODE" "$DIR/server.mjs" --app >>"\$LOG" 2>&1 &
   for _ in \$(seq 1 50); do
@@ -38,7 +38,7 @@ if ! curl -sf http://localhost:8080/status >/dev/null; then
 fi
 open http://localhost:8080/
 LAUNCHER
-chmod +x "$APP/Contents/MacOS/printer-cam"
+chmod +x "$APP/Contents/MacOS/phoneondesk"
 
 if [ -f "$DIR/icon.icns" ]; then cp "$DIR/icon.icns" "$APP/Contents/Resources/icon.icns"; fi
 touch "$APP"

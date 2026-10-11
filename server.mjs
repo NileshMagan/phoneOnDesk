@@ -1,9 +1,9 @@
-// Printer cam: phone POSTs JPEG frames, Mac watches an MJPEG stream. No dependencies.
+// phoneOnDesk: phone POSTs JPEG frames; the Mac viewer gets a ping per frame and fetches it. No dependencies.
 // `node server.mjs --app` quits on its own once the viewer tab has been closed.
 import https from 'node:https';
 import http from 'node:http';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -49,7 +49,7 @@ function ensureCert() {
     execFileSync('openssl', [
       'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '3650',
       '-keyout', join(certDir, 'key.pem'), '-out', join(certDir, 'cert.pem'),
-      '-subj', '/CN=printer-cam', '-addext', `subjectAltName=${san}`,
+      '-subj', '/CN=phoneondesk', '-addext', `subjectAltName=${san}`,
     ], { stdio: 'ignore' });
     writeFileSync(ipsFile, ips.join('\n') + '\n');
   }
@@ -71,16 +71,58 @@ function scheduleQuit() {
 
 function shutdown(reason) {
   console.log(`stopping: ${reason}`);
+  scrcpyProc?.kill();
   process.exit(0);
 }
 
-function sendFrame(res) {
-  res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`);
-  res.write(frame);
-  res.write('\r\n');
+function announceFrame() {
+  for (const w of watchers) w.write(`data: ${status.at}\n\n`);
 }
 
 const isLoopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+
+function readBody(req, limit = 1_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('too large')); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  });
+}
+
+const json = (res, code, body) => {
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
+};
+
+// Clipboard hand-off: one slot each way.
+const clip = { toMac: { text: '', at: 0 }, toPhone: { text: '', at: 0 } };
+
+// Phone screen via adb + scrcpy. Apps launched from Finder don't get Homebrew on PATH.
+const toolEnv = { ...process.env, PATH: `${process.env.PATH || ''}:/opt/homebrew/bin:/usr/local/bin` };
+const hasTool = (name) => {
+  try { execFileSync('which', [name], { env: toolEnv, stdio: 'ignore' }); return true; } catch { return false; }
+};
+const run = (cmd, args, timeout = 15_000) =>
+  new Promise((resolve) => {
+    execFile(cmd, args, { env: toolEnv, timeout }, (err, stdout, stderr) =>
+      resolve({ ok: !err, out: `${stdout}${stderr}`.trim() }));
+  });
+
+async function adbDevices() {
+  const { out } = await run('adb', ['devices', '-l']);
+  return out.split('\n').slice(1).filter((l) => l.trim() && !l.startsWith('*')).map((l) => {
+    const [serial, state] = l.trim().split(/\s+/);
+    const model = (l.match(/model:(\S+)/) || [])[1]?.replace(/_/g, ' ') || serial;
+    return { serial, state, model };
+  });
+}
+
+let scrcpyProc = null;
 
 function handle(req, res) {
   const url = new URL(req.url, 'https://x');
@@ -98,22 +140,22 @@ function handle(req, res) {
         w: Number(url.searchParams.get('w')) || 0,
         h: Number(url.searchParams.get('h')) || 0,
       };
-      for (const w of watchers) sendFrame(w);
+      announceFrame();
       res.writeHead(204).end();
     });
     return;
   }
 
-  if (url.pathname === '/stream') {
-    res.writeHead(200, {
-      'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
-      'Cache-Control': 'no-store',
-      Connection: 'close',
-    });
+  // Server-sent events: one message per new frame. Open connections count as viewers.
+  if (url.pathname === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+    res.write('retry: 2000\n\n');
+    if (frame) res.write(`data: ${status.at}\n\n`);
     watchers.add(res);
     clearTimeout(quitTimer);
-    if (frame) sendFrame(res);
+    const keepAlive = setInterval(() => res.write(': ping\n\n'), 15_000);
     req.on('close', () => {
+      clearInterval(keepAlive);
       watchers.delete(res);
       scheduleQuit();
     });
@@ -145,6 +187,61 @@ function handle(req, res) {
     if (!isLoopback(req)) return res.writeHead(403).end();
     res.writeHead(204).end();
     return setTimeout(() => shutdown('stop button'), 100);
+  }
+
+  if (url.pathname === '/clip') {
+    if (req.method === 'GET') return json(res, 200, clip);
+    if (req.method === 'POST') {
+      const slot = url.searchParams.get('to') === 'phone' ? 'toPhone' : 'toMac';
+      readBody(req).then(
+        (text) => { clip[slot] = { text, at: Date.now() }; json(res, 200, { ok: true }); },
+        () => json(res, 413, { error: 'Too much text' }),
+      );
+      return;
+    }
+  }
+
+  // Phone-control endpoints only answer the Mac itself, never the network.
+  if (url.pathname.startsWith('/adb') || url.pathname === '/screen') {
+    if (!isLoopback(req)) return json(res, 403, { error: 'Mac only' });
+
+    if (url.pathname === '/adb' && req.method === 'GET') {
+      if (!hasTool('adb') || !hasTool('scrcpy')) return json(res, 200, { tools: false, devices: [] });
+      adbDevices().then((devices) => json(res, 200, { tools: true, devices, screenOpen: !!scrcpyProc }));
+      return;
+    }
+
+    if (req.method === 'POST' && (url.pathname === '/adb/pair' || url.pathname === '/adb/connect')) {
+      readBody(req).then(async (body) => {
+        const { target = '', code = '' } = JSON.parse(body || '{}');
+        if (!/^[\w.-]+:\d+$/.test(target)) return json(res, 400, { ok: false, out: 'Use the IP address:port shown on the phone, e.g. 192.168.1.20:37123' });
+        const args = url.pathname === '/adb/pair' ? ['pair', target, String(code).replace(/\D/g, '')] : ['connect', target];
+        const result = await run('adb', args);
+        const ok = result.ok && !/fail|unable|error/i.test(result.out);
+        const out = result.out || (ok ? 'Done' : "Couldn't reach the phone. Check the address and that Wireless debugging is on.");
+        json(res, 200, { ok, out });
+      });
+      return;
+    }
+
+    if (url.pathname === '/screen' && req.method === 'POST') {
+      if (scrcpyProc) return json(res, 200, { ok: true, out: 'Already open' });
+      adbDevices().then((devices) => {
+        const device = devices.find((d) => d.state === 'device');
+        if (!device) return json(res, 409, { ok: false, out: 'No phone connected. Pair it first.' });
+        scrcpyProc = spawn('scrcpy', ['-s', device.serial, '--window-title=phoneOnDesk', '--no-audio', '--stay-awake'], {
+          env: toolEnv, stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        let err = '';
+        scrcpyProc.stderr.on('data', (d) => (err += d));
+        scrcpyProc.on('exit', (code) => {
+          if (code) console.log(`scrcpy exited ${code}: ${err.slice(-500)}`);
+          scrcpyProc = null;
+        });
+        json(res, 200, { ok: true, out: `Opening ${device.model}` });
+      });
+      return;
+    }
   }
 
   const html = { '/': 'view.html', '/view': 'view.html', '/cam': 'cam.html' }[url.pathname];
