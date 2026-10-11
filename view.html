@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer Cam</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0c; color: #eee; font: 15px system-ui, sans-serif; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  img#img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #bar { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items: center; }
+  .pill { background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 999px; backdrop-filter: blur(6px); }
+  .low { color: #ff6b6b; }
+  .stale { color: #ffb347; }
+  .spacer { flex: 1; }
+  button { font: inherit; color: #eee; background: rgba(0,0,0,.6); border: 1px solid #333; border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+  button:hover { border-color: #666; }
+  #setup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,5,6,.85); padding: 16px; }
+  #setup[hidden] { display: none; }
+  .card { background: #17171a; border: 1px solid #2a2a2e; border-radius: 16px; padding: 24px 28px; max-width: 720px; width: 100%; display: flex; gap: 28px; flex-wrap: wrap; position: relative; }
+  .card h1 { font-size: 20px; margin: 0 0 12px; }
+  .card ol { margin: 0; padding-left: 20px; line-height: 1.6; }
+  .card li { margin-bottom: 6px; }
+  .card code { background: #24242a; padding: 2px 6px; border-radius: 6px; font-size: 13px; word-break: break-all; }
+  .card .muted { opacity: .65; font-size: 13px; margin-top: 12px; line-height: 1.5; }
+  #qr { background: #fff; padding: 12px; border-radius: 12px; align-self: flex-start; }
+  #qr img, #qr canvas { display: block; }
+  .steps { flex: 1; min-width: 260px; }
+  #close { position: absolute; top: 12px; right: 12px; }
+  #stopped { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: #0b0b0c; font-size: 18px; opacity: .8; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="wrap"><img id="img" alt="Printer camera"></div>
+
+<div id="bar">
+  <span class="pill" id="bat">🔋 –</span>
+  <span class="pill" id="age">waiting for phone</span>
+  <span class="spacer"></span>
+  <button id="help">Phone setup</button>
+  <button id="stop" title="Stops the server; also happens on its own ~20s after you close this tab">Stop</button>
+</div>
+
+<div id="setup">
+  <div class="card">
+    <button id="close">Close</button>
+    <div id="qr"></div>
+    <div class="steps">
+      <h1>Connect your phone</h1>
+      <ol>
+        <li>Phone on the same Wi‑Fi as this Mac. Scan the QR code with the camera app, or open <code id="named"></code> in Chrome.</li>
+        <li>First time only: Chrome shows a security warning. Tap <b>Advanced → Proceed</b>. It's this Mac's own certificate.</li>
+        <li>Allow the camera, point it at the printer, tap <b>Start streaming</b>. Keep the phone plugged in.</li>
+        <li>Tip: in Chrome's ⋮ menu choose <b>Add to Home screen</b> so it's one tap next time.</li>
+      </ol>
+      <div class="muted" id="alts"></div>
+      <div class="muted">To stop, just close this tab. The server shuts itself down about 20 seconds later.</div>
+    </div>
+  </div>
+</div>
+
+<div id="stopped">Printer Cam stopped.<br>Open the Printer Cam app again to restart.</div>
+
+<script>
+const img = document.getElementById('img');
+const setup = document.getElementById('setup');
+let gotFrame = false, dismissed = false, stopped = false;
+
+img.src = '/stream';
+img.onerror = () => { if (!stopped) setTimeout(() => (img.src = '/stream?' + Date.now()), 2000); };
+
+document.getElementById('help').onclick = () => { setup.hidden = false; };
+document.getElementById('close').onclick = () => { setup.hidden = true; dismissed = true; };
+document.getElementById('stop').onclick = async () => {
+  stopped = true;
+  try { await fetch('/quit', { method: 'POST' }); } catch {}
+  document.getElementById('stopped').style.display = 'flex';
+  img.removeAttribute('src');
+};
+
+fetch('/info').then((r) => r.json()).then(({ phoneUrls }) => {
+  // QR uses the IP address: it's the most reliable on Android. The .local name is the bookmarkable one.
+  const primary = phoneUrls.lan[0] || phoneUrls.tailscale[0] || phoneUrls.named;
+  document.getElementById('named').textContent = phoneUrls.named || primary;
+  if (window.QRCode) new QRCode(document.getElementById('qr'), { text: primary, width: 200, height: 200 });
+  else document.getElementById('qr').style.display = 'none';
+  const alts = [];
+  if (phoneUrls.lan.length) alts.push(`If the name doesn't load on your phone, use <code>${phoneUrls.lan[0]}</code>.`);
+  if (phoneUrls.tailscale.length) alts.push(`Away from home with Tailscale on the phone: <code>${phoneUrls.tailscale[0]}</code>`);
+  document.getElementById('alts').innerHTML = alts.join('<br>');
+});
+
+async function poll() {
+  if (stopped) return;
+  try {
+    const s = await (await fetch('/status')).json();
+    const bat = document.getElementById('bat');
+    const age = document.getElementById('age');
+    if (s.at && !gotFrame) { gotFrame = true; if (!dismissed) setup.hidden = true; }
+    if (!s.at && !dismissed) setup.hidden = false;
+    if (s.level != null) {
+      bat.textContent = `${s.charging ? '⚡' : '🔋'} ${s.level}%`;
+      bat.className = 'pill' + (s.level <= 20 && !s.charging ? ' low' : '');
+    }
+    if (s.ageMs != null) {
+      const sec = Math.round(s.ageMs / 1000);
+      age.textContent = sec < 5 ? '● live' : `last frame ${sec < 60 ? sec + 's' : Math.round(sec / 60) + 'm'} ago`;
+      age.className = 'pill' + (sec >= 5 ? ' stale' : '');
+      // Reconnect the stream if it went stale but frames are flowing again.
+      if (sec < 5 && img.dataset.stale) { delete img.dataset.stale; img.src = '/stream?' + Date.now(); }
+      if (sec >= 10) img.dataset.stale = '1';
+    }
+  } catch {
+    document.getElementById('stopped').style.display = 'flex';
+  }
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

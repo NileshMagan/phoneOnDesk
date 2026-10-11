@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer Cam – Phone</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font: 16px system-ui, sans-serif; text-align: center; }
+  video { width: 100%; max-height: 70vh; background: #000; }
+  button { font-size: 20px; padding: 14px 28px; margin: 16px; border-radius: 12px; border: 0; background: #2d7ff9; color: #fff; }
+  select { font-size: 16px; padding: 6px; }
+  #info { opacity: .8; padding: 0 16px; }
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<div>
+  <button id="go">Start streaming</button>
+  <label>Quality <select id="q">
+    <option value="1">1 fps</option>
+    <option value="2" selected>2 fps</option>
+    <option value="5">5 fps</option>
+  </select></label>
+</div>
+<p id="info">Point the camera at the printer, then tap Start. Keep this tab open.</p>
+<script>
+const v = document.getElementById('v');
+const info = document.getElementById('info');
+const canvas = document.createElement('canvas');
+let battery = null, running = false, sent = 0, wakeLock = null;
+
+async function lockScreen() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible') lockScreen();
+});
+
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false,
+  });
+  v.srcObject = stream;
+  await v.play();
+  try { battery = await navigator.getBattery(); } catch {}
+  await lockScreen();
+  running = true;
+  document.getElementById('go').textContent = 'Streaming…';
+  loop();
+}
+
+async function loop() {
+  while (running) {
+    const t0 = Date.now();
+    const w = Math.min(v.videoWidth, 1280);
+    const h = Math.round(v.videoHeight * (w / v.videoWidth));
+    if (w && h) {
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(v, 0, 0, w, h);
+      const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.7));
+      const qs = new URLSearchParams({ w, h });
+      if (battery) {
+        qs.set('battery', Math.round(battery.level * 100));
+        qs.set('charging', battery.charging ? '1' : '0');
+      }
+      try {
+        await fetch('/frame?' + qs, { method: 'POST', body: blob });
+        sent++;
+        info.textContent = `Sent ${sent} frames` + (battery ? ` · battery ${Math.round(battery.level * 100)}%` : '');
+      } catch (e) {
+        info.textContent = 'Can\'t reach the Mac. Is the Printer Cam app open there? Retrying…';
+      }
+    }
+    const fps = Number(document.getElementById('q').value);
+    await new Promise((r) => setTimeout(r, Math.max(0, 1000 / fps - (Date.now() - t0))));
+  }
+}
+
+document.getElementById('go').onclick = () => {
+  if (!running) start().catch((e) => (info.textContent = 'Camera error: ' + e.message));
+};
+</script>
+</body>
+</html>
