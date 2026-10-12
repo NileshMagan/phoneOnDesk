@@ -21,9 +21,10 @@ import (
 // adbTool finds adb (Android's debugging tool, which pairs with the phone and carries its
 // screen), or downloads Google's own copy into the data folder when the reader asks for it.
 type adbTool struct {
-	dataDir string
-	mu      sync.Mutex
-	path    string
+	dataDir   string
+	mu        sync.Mutex
+	path      string
+	installMu sync.Mutex // one download at a time
 
 	devices *shortCache[[]device]
 	battery *shortCache[batteryInfo]
@@ -157,6 +158,8 @@ func platformToolsURL() string {
 
 // install downloads Google's platform-tools and keeps them in the data folder.
 func (a *adbTool) install() error {
+	a.installMu.Lock()
+	defer a.installMu.Unlock()
 	client := http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(platformToolsURL())
 	if err != nil {

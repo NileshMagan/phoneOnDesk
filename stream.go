@@ -104,7 +104,10 @@ func (s *phoneStream) start() {
 		s.stop(err.Error())
 		return
 	}
-	go s.readVideo()
+	s.mu.Lock()
+	video := s.video
+	s.mu.Unlock()
+	go s.readVideo(video)
 }
 
 // wait blocks until the stream is running or has failed.
@@ -145,27 +148,56 @@ func (s *phoneStream) connectPhone() error {
 		params = append(params, "stay_awake=true")
 	}
 	args := append([]string{"-s", s.serial, "shell", "CLASSPATH=/data/local/tmp/scrcpy-server.jar", "app_process", "/", "com.genymobile.scrcpy.Server", scrcpyVersion}, params...)
-	s.proc = exec.Command(adbPath, args...)
-	s.proc.Stdout = s.output
-	s.proc.Stderr = s.output
-	if err := s.proc.Start(); err != nil {
+	proc := exec.Command(adbPath, args...)
+	proc.Stdout = s.output
+	proc.Stderr = s.output
+	// Started under the lock, so a stop() that races with us either prevents it or can kill it.
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return errors.New("stopped")
+	}
+	if err := proc.Start(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
+	s.proc = proc
+	s.mu.Unlock()
 	go func() {
-		_ = s.proc.Wait()
+		_ = proc.Wait()
 		s.stop(s.output.lastError("the phone stream ended"))
 	}()
 
-	if s.video, err = s.dial(true); err != nil {
+	video, err := s.dial(true)
+	if err != nil {
 		return err
 	}
+	if !s.own(&s.video, video) {
+		return errors.New("stopped")
+	}
 	if s.source == "display" {
-		if s.control, err = s.dial(false); err != nil {
+		control, err := s.dial(false)
+		if err != nil {
 			return err
 		}
-		go io.Copy(io.Discard, s.control) // clipboard and acks from the phone: not used
+		if !s.own(&s.control, control) {
+			return errors.New("stopped")
+		}
+		go io.Copy(io.Discard, control) // clipboard and acks from the phone: not used
 	}
 	return nil
+}
+
+// own records a connection the session holds, or closes it if the session has already stopped.
+func (s *phoneStream) own(field *net.Conn, conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		conn.Close()
+		return false
+	}
+	*field = conn
+	return true
 }
 
 // dial retries because adb accepts the connection before the phone's server is listening; the
@@ -193,8 +225,8 @@ func (s *phoneStream) dial(expectDummy bool) (net.Conn, error) {
 	return nil, errors.New(s.output.lastError("could not connect to the phone"))
 }
 
-func (s *phoneStream) readVideo() {
-	r := bufio.NewReaderSize(s.video, 1<<16)
+func (s *phoneStream) readVideo(video net.Conn) {
+	r := bufio.NewReaderSize(video, 1<<16)
 	head := make([]byte, 12)
 	if _, err := io.ReadFull(r, head); err != nil {
 		s.stop("the phone stream closed")
@@ -249,24 +281,31 @@ func (s *phoneStream) packet(flags uint64, data []byte) {
 	}
 	message := frameMessage(kind, data)
 	for c := range s.clients {
-		// A viewer that fell behind skips ahead to the next keyframe instead.
-		if c.needKey && !key {
-			continue
+		// A viewer that fell behind skips ahead to the next keyframe, and only resumes once it has
+		// the current screen settings too, or its decoder would pair them wrongly.
+		if c.needKey {
+			if !key || s.config == nil || !s.trySend(c, frameMessage(msgConfig, s.config)) {
+				continue
+			}
+			c.needKey = false
 		}
-		if c.needKey && s.config != nil {
-			s.send(c, frameMessage(msgConfig, s.config))
-		}
-		c.needKey = false
 		s.send(c, message)
 	}
 }
 
 // send queues without blocking; a full queue marks the viewer as needing a keyframe.
 func (s *phoneStream) send(c *streamClient, message []byte) {
+	if !s.trySend(c, message) {
+		c.needKey = true
+	}
+}
+
+func (s *phoneStream) trySend(c *streamClient, message []byte) bool {
 	select {
 	case c.out <- message:
+		return true
 	default:
-		c.needKey = true
+		return false
 	}
 }
 
@@ -323,12 +362,16 @@ func (s *phoneStream) addClient() (*streamClient, func()) {
 }
 
 func (s *phoneStream) sendControl(message []byte) {
+	s.mu.Lock()
+	control := s.control
+	s.mu.Unlock()
+	if control == nil {
+		return
+	}
 	s.ctlMu.Lock()
 	defer s.ctlMu.Unlock()
-	if s.control != nil {
-		s.control.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_, _ = s.control.Write(message)
-	}
+	control.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	_, _ = control.Write(message)
 }
 
 func (s *phoneStream) isStopped() bool {
@@ -349,23 +392,28 @@ func (s *phoneStream) stop(reason string) {
 	}
 	end := frameMessage(msgEnd, []byte(reason))
 	for c := range s.clients {
-		select {
-		case c.out <- end:
-		default:
+		// Make room if need be, so the page learns why rather than just "ended".
+		if !s.trySend(c, end) {
+			select {
+			case <-c.out:
+			default:
+			}
+			s.trySend(c, end)
 		}
 		close(c.out)
 	}
 	s.clients = map[*streamClient]struct{}{}
+	video, control, proc := s.video, s.control, s.proc
 	s.mu.Unlock()
 
-	if s.video != nil {
-		s.video.Close()
+	if video != nil {
+		video.Close()
 	}
-	if s.control != nil {
-		s.control.Close()
+	if control != nil {
+		control.Close()
 	}
-	if s.proc != nil && s.proc.Process != nil {
-		_ = s.proc.Process.Kill()
+	if proc != nil && proc.Process != nil {
+		_ = proc.Process.Kill()
 	}
 	go s.adb.run(5*time.Second, "-s", s.serial, "forward", "--remove", fmt.Sprintf("tcp:%d", s.port))
 	log.Printf("%s stream ended: %s", s.source, reason)

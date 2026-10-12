@@ -1,14 +1,19 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -52,6 +57,10 @@ type server struct {
 	hostsMu sync.Mutex
 	hosts   map[string]bool
 	hostsAt time.Time
+
+	// phoneKey is the secret in the QR code. Anything not on this computer must hold it, so
+	// someone else on the same Wi-Fi can't watch the camera or read the clipboard.
+	phoneKey string
 }
 
 func newServer(cfg config) (*server, error) {
@@ -59,9 +68,13 @@ func newServer(cfg config) (*server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("making this computer's certificate: %w", err)
 	}
-	s := &server{cfg: cfg, adb: newAdb(cfg.dataDir), quit: make(chan string, 1), watchers: map[chan int64]struct{}{}, streams: map[string]*phoneStream{}}
+	key, err := loadPhoneKey(cfg.dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("making the phone's key: %w", err)
+	}
+	s := &server{cfg: cfg, adb: newAdb(cfg.dataDir), quit: make(chan string, 1), watchers: map[chan int64]struct{}{}, streams: map[string]*phoneStream{}, phoneKey: key}
 	handler := http.HandlerFunc(s.handle)
-	s.http = &http.Server{Addr: fmt.Sprintf(":%d", cfg.httpPort), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	s.http = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	s.https = &http.Server{Addr: fmt.Sprintf(":%d", cfg.httpsPort), Handler: handler, ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}
 	// In app mode, give the browser a minute to open the viewer before deciding nobody's watching.
@@ -185,6 +198,10 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	path := r.URL.Path
 
+	if !isLoopback(r) && !s.phoneAllowed(w, r) {
+		return
+	}
+
 	// Routes that act on the phone or this computer answer only the computer itself.
 	if path == "/hello" || path == "/quit" || path == "/adb" || strings.HasPrefix(path, "/adb/") || strings.HasPrefix(path, "/phone/") {
 		if !isLoopback(r) {
@@ -221,9 +238,14 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"level": st.Level, "charging": st.Charging, "at": st.At, "w": st.W, "h": st.H, "ageMs": age})
 	case path == "/info":
 		addrs := currentAddresses()
-		urls := map[string]any{"named": nil, "lan": phoneURLs(addrs.lan, s.cfg.httpsPort), "tailscale": phoneURLs(addrs.tailscale, s.cfg.httpsPort)}
+		// The key goes only to this computer's own viewer, which shows it as the QR code.
+		key := ""
+		if isLoopback(r) {
+			key = s.phoneKey
+		}
+		urls := map[string]any{"named": nil, "lan": phoneURLs(addrs.lan, s.cfg.httpsPort, key), "tailscale": phoneURLs(addrs.tailscale, s.cfg.httpsPort, key)}
 		if name := localName(); name != "" {
-			urls["named"] = fmt.Sprintf("https://%s:%d/cam", name, s.cfg.httpsPort)
+			urls["named"] = camURL(name, s.cfg.httpsPort, key)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"phoneUrls": urls, "appMode": s.cfg.appMode, "version": version})
 	case path == "/hello":
@@ -296,12 +318,58 @@ func (s *server) page(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-func phoneURLs(ips []string, port int) []string {
+func phoneURLs(ips []string, port int, key string) []string {
 	out := []string{}
 	for _, ip := range ips {
-		out = append(out, fmt.Sprintf("https://%s:%d/cam", ip, port))
+		out = append(out, camURL(ip, port, key))
 	}
 	return out
+}
+
+func camURL(host string, port int, key string) string {
+	u := fmt.Sprintf("https://%s:%d/cam", host, port)
+	if key != "" {
+		u += "?key=" + key
+	}
+	return u
+}
+
+const keyCookie = "phoneondesk_key"
+
+// phoneAllowed lets in a device holding the phone key: from its cookie, or from the QR code's
+// link, which then sets the cookie so the page's own requests carry it.
+func (s *server) phoneAllowed(w http.ResponseWriter, r *http.Request) bool {
+	matches := func(v string) bool { return subtle.ConstantTimeCompare([]byte(v), []byte(s.phoneKey)) == 1 }
+	if c, err := r.Cookie(keyCookie); err == nil && matches(c.Value) {
+		return true
+	}
+	if r.URL.Path == "/cam" && matches(r.URL.Query().Get("key")) {
+		http.SetCookie(w, &http.Cookie{Name: keyCookie, Value: s.phoneKey, Path: "/", MaxAge: 400 * 24 * 3600,
+			Secure: r.TLS != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		return true
+	}
+	if r.URL.Path == "/cam" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, scanAgainPage)
+		return false
+	}
+	http.Error(w, "scan the QR code on your computer first", http.StatusForbidden)
+	return false
+}
+
+// loadPhoneKey keeps one key, so a phone that scanned once (or bookmarked the page) keeps working.
+func loadPhoneKey(dir string) (string, error) {
+	path := filepath.Join(dir, "phone-key")
+	if b, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(b))) >= 32 {
+		return strings.TrimSpace(string(b)), nil
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	key := hex.EncodeToString(raw)
+	return key, os.WriteFile(path, []byte(key+"\n"), 0o600)
 }
 
 func (s *server) cameraAt() int64 {
@@ -550,6 +618,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+const scanAgainPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phoneOnDesk</title><body style="font:16px system-ui;background:#0b0b0c;color:#eee;display:grid;place-items:center;height:100vh;margin:0;text-align:center;padding:0 24px">
+<div><h1 style="font-size:20px">Scan the code on your computer</h1><p style="opacity:.7">Open phoneOnDesk on your computer and scan the QR code it shows. It carries a key, so only your phone can send the camera there.</p></div>`
 
 const connectedPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>phoneOnDesk connected</title><body style="font:16px system-ui;background:#0b0b0c;color:#eee;display:grid;place-items:center;height:100vh;margin:0;text-align:center">

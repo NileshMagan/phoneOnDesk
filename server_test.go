@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -103,5 +104,39 @@ func TestFrameMessage(t *testing.T) {
 	want := []byte{msgKey, 0, 0, 0, 2, 9, 8}
 	if string(got) != string(want) {
 		t.Errorf("frameMessage = %v, want %v", got, want)
+	}
+}
+
+func TestOthersOnTheWiFiNeedThePhoneKey(t *testing.T) {
+	s := testServer(t)
+	fromWiFi := func(target string, cookie string) *httptest.ResponseRecorder {
+		r := request("GET", target, nil)
+		r.RemoteAddr = "192.168.1.77:40000"
+		r.Host = "127.0.0.1:8443"
+		if cookie != "" {
+			r.AddCookie(&http.Cookie{Name: keyCookie, Value: cookie})
+		}
+		w := httptest.NewRecorder()
+		s.handle(w, r)
+		return w
+	}
+	for _, path := range []string{"/clip", "/snapshot.jpg", "/status", "/events", "/cam"} {
+		if w := fromWiFi("https://127.0.0.1:8443"+path, ""); w.Code != http.StatusForbidden {
+			t.Errorf("%s without the key: got %d, want 403", path, w.Code)
+		}
+	}
+	if w := fromWiFi("https://127.0.0.1:8443/clip", "wrong"); w.Code != http.StatusForbidden {
+		t.Errorf("wrong key: got %d, want 403", w.Code)
+	}
+	w := fromWiFi("https://127.0.0.1:8443/cam?key="+s.phoneKey, "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Set-Cookie"), keyCookie+"="+s.phoneKey) {
+		t.Errorf("scanning the QR code: got %d, cookie %q", w.Code, w.Header().Get("Set-Cookie"))
+	}
+	if w := fromWiFi("https://127.0.0.1:8443/clip", s.phoneKey); w.Code != http.StatusOK {
+		t.Errorf("phone holding the key: got %d, want 200", w.Code)
+	}
+	// The key is never handed out over the network.
+	if w := fromWiFi("https://127.0.0.1:8443/info", s.phoneKey); strings.Contains(w.Body.String(), s.phoneKey) {
+		t.Error("/info gave the key to a device on the network")
 	}
 }

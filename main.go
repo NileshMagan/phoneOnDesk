@@ -11,12 +11,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +36,7 @@ type config struct {
 func main() {
 	appMode := flag.Bool("app", false, "open the viewer on start, and quit about 20 seconds after the last viewer closes")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	serving := flag.Bool("serve", false, "internal: the background server a Mac app launch starts")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("phoneOnDesk", version)
@@ -41,8 +44,27 @@ func main() {
 	}
 
 	// Opened by double-click (a Mac .app or a Linux AppImage), it behaves as an app.
-	if exe, err := os.Executable(); err == nil && strings.Contains(exe, ".app/Contents/MacOS/") || os.Getenv("APPIMAGE") != "" {
+	exe, _ := os.Executable()
+	inMacApp := strings.Contains(exe, ".app/Contents/MacOS/")
+	if inMacApp || os.Getenv("APPIMAGE") != "" {
 		*appMode = true
+	}
+	// macOS only activates an app that is still running when it's opened again, and this one has
+	// no window, so a second double-click would do nothing. The app launch therefore starts the
+	// server in the background and exits: every double-click then lands here afresh.
+	// (Not on Linux: an AppImage's files vanish when the process that mounted them exits.)
+	if inMacApp && !*serving {
+		if alreadyRunning(envInt("CAM_HTTP_PORT", 8080)) {
+			openBrowser(fmt.Sprintf("http://localhost:%d/", envInt("CAM_HTTP_PORT", 8080)))
+			return
+		}
+		cmd := exec.Command(exe, "--serve", "--app")
+		cmd.Dir = "/"
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	cfg := config{
@@ -73,8 +95,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	errs := make(chan error, 2)
-	go func() { errs <- srv.http.ListenAndServe() }()
+	errs := make(chan error, 3)
+	// The viewer is for this computer only; the phone reaches the HTTPS port over Wi-Fi.
+	for _, addr := range []string{"127.0.0.1", "::1"} {
+		ln, err := net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(cfg.httpPort)))
+		if err != nil {
+			if addr == "::1" {
+				continue // a computer without IPv6 loopback still has 127.0.0.1
+			}
+			log.Fatal(err)
+		}
+		go func() { errs <- srv.http.Serve(ln) }()
+	}
 	go func() { errs <- srv.https.ListenAndServeTLS("", "") }()
 	log.Printf("phoneOnDesk %s · viewer %s · phone https://<this computer>:%d/cam", version, viewer, cfg.httpsPort)
 	if cfg.appMode {

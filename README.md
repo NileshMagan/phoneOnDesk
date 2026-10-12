@@ -21,7 +21,7 @@ It runs on your computer and talks to the phone over your own Wi‑Fi. Nothing g
 ## Use
 
 1. Open phoneOnDesk. Your browser shows its page with a QR code.
-2. On the phone, scan the code, continue past the certificate warning once (it's your computer's own certificate), allow the camera, and tap **Start**.
+2. On the phone, scan the code (it carries a key, so only your phone gets in), continue past the certificate warning once (it's your computer's own certificate), allow the camera, and tap **Start**.
 3. For the phone's screen, click **Phone screen** and follow the one-time pairing steps. The first time, it offers to download Android's own tools (adb, from Google).
 4. Close the tab when you're done. phoneOnDesk quits about 20 seconds later.
 
@@ -33,6 +33,7 @@ Pages on other websites can show phoneOnDesk too, but only websites on its allow
 - **Camera:** the phone's page (`web/cam.html`) posts JPEG frames and the battery level. The viewer gets a server-sent event per frame and fetches `/snapshot.jpg`.
 - **Phone screen and "direct" camera:** phoneOnDesk runs scrcpy's on-device server (`third_party/scrcpy`, Apache 2.0) over adb. It relays the H.264 video on `/phone/stream`, and the page decodes it with WebCodecs. Touches, scrolls and keys go back as scrcpy control messages on `/phone/control`.
 - **Safety:**
+  - Anything not on this computer needs the key from the QR code, so others on the same Wi‑Fi can’t watch or read the clipboard. The viewer port only listens on this computer.
   - It only answers its own host names, which blocks DNS rebinding.
   - It only answers cross-site requests from allowed origins. Another site may link to its pages, nothing more.
   - Phone and pairing routes answer only this computer.
