@@ -71,7 +71,7 @@ function scheduleQuit() {
 
 function shutdown(reason) {
   console.log(`stopping: ${reason}`);
-  scrcpyProc?.kill();
+  closeScreen();
   process.exit(0);
 }
 
@@ -123,6 +123,12 @@ async function adbDevices() {
 }
 
 let scrcpyProc = null;
+const SCREEN_APP = process.env.SCREEN_APP && existsSync(process.env.SCREEN_APP) ? process.env.SCREEN_APP : null;
+const closeScreen = () => {
+  scrcpyProc?.kill();
+  // The helper execs scrcpy, so match it by its window title.
+  try { execFileSync('pkill', ['-f', 'scrcpy .*--window-title=Phone screen']); } catch {}
+};
 
 function handle(req, res) {
   const url = new URL(req.url, 'https://x');
@@ -225,17 +231,22 @@ function handle(req, res) {
     }
 
     if (url.pathname === '/screen' && req.method === 'POST') {
-      if (scrcpyProc) return json(res, 200, { ok: true, out: 'Already open' });
+      if (scrcpyProc) {
+        if (SCREEN_APP) spawn('open', ['-a', SCREEN_APP]);
+        return json(res, 200, { ok: true, out: 'Phone screen brought to the front' });
+      }
       adbDevices().then((devices) => {
         const device = devices.find((d) => d.state === 'device');
         if (!device) return json(res, 409, { ok: false, out: 'No phone connected. Pair it first.' });
-        scrcpyProc = spawn('scrcpy', ['-s', device.serial, '--window-title=phoneOnDesk', '--no-audio', '--stay-awake'], {
-          env: toolEnv, stdio: ['ignore', 'ignore', 'pipe'],
-        });
+        const args = ['-s', device.serial, '--window-title=Phone screen', '--no-audio', '--stay-awake'];
+        // `open -W` lasts as long as the window does, so scrcpyProc still tracks whether it's open.
+        scrcpyProc = SCREEN_APP
+          ? spawn('open', ['-W', '-n', '-a', SCREEN_APP, '--args', ...args], { env: toolEnv, stdio: ['ignore', 'ignore', 'pipe'] })
+          : spawn('scrcpy', args, { env: toolEnv, stdio: ['ignore', 'ignore', 'pipe'] });
         let err = '';
         scrcpyProc.stderr.on('data', (d) => (err += d));
         scrcpyProc.on('exit', (code) => {
-          if (code) console.log(`scrcpy exited ${code}: ${err.slice(-500)}`);
+          if (code) console.log(`phone screen exited ${code}: ${err.slice(-500)}`);
           scrcpyProc = null;
         });
         json(res, 200, { ok: true, out: `Opening ${device.model}` });
