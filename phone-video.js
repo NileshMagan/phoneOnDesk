@@ -78,7 +78,8 @@ class PhoneVideo {
       if (!this.decoder || this.decoder.state === 'closed') {
         this.decoder = new VideoDecoder({
           output: (frame) => this.#draw(frame),
-          error: (e) => console.warn('decoder', e),
+          // A failed decoder is closed for good: end the stream so the page reconnects.
+          error: () => { if (!this.closed) { this.closed = true; this.abort?.abort(); this.onEnd?.('The video decoder stopped'); } },
         });
       } else {
         this.decoder.reset();
@@ -188,16 +189,19 @@ const control = {
   },
 };
 
-// Batches control messages so a drag sends one request per animation frame, not per event.
+// Batches control messages so a drag sends one request per animation frame, not per event, and
+// sends one batch at a time: parallel requests can land out of order and leave a finger down.
 const controlQueue = [];
+let controlBusy = false;
 function sendControl(...msgs) {
   controlQueue.push(...msgs);
-  if (controlQueue.length === msgs.length) {
-    requestAnimationFrame(() => {
-      const parts = controlQueue.splice(0);
-      fetch(`${PHONE_BASE}/phone/control`, { method: 'POST', body: new Blob(parts) }).catch(() => {});
-    });
-  }
+  if (!controlBusy) { controlBusy = true; requestAnimationFrame(flushControl); }
+}
+async function flushControl() {
+  const parts = controlQueue.splice(0);
+  try { await fetch(`${PHONE_BASE}/phone/control`, { method: 'POST', body: new Blob(parts) }); } catch {}
+  if (controlQueue.length) requestAnimationFrame(flushControl);
+  else controlBusy = false;
 }
 function pressKey(keycode) {
   sendControl(control.key(0, keycode), control.key(1, keycode));

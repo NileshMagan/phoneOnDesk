@@ -14,6 +14,7 @@ const PORT = Number(process.env.CAM_HTTPS_PORT || 8443);
 const HTTP_PORT = Number(process.env.CAM_HTTP_PORT || 8080);
 const APP_MODE = process.argv.includes('--app');
 const QUIT_AFTER_MS = 20_000;
+const VERSION = '0.3.0';
 const page = (name) => readFileSync(join(dir, name));
 
 // Addresses the phone can reach this Mac on.
@@ -106,8 +107,13 @@ const clip = { toMac: { text: '', at: 0 }, toPhone: { text: '', at: 0 } };
 
 // Phone screen via adb + scrcpy. Apps launched from Finder don't get Homebrew on PATH.
 const toolEnv = { ...process.env, PATH: `${process.env.PATH || ''}:/opt/homebrew/bin:/usr/local/bin` };
+// Looked up once: `which` blocks the event loop, and that stalls the video relay.
+const toolFound = new Map();
 const hasTool = (name) => {
-  try { execFileSync('which', [name], { env: toolEnv, stdio: 'ignore' }); return true; } catch { return false; }
+  if (!toolFound.has(name)) {
+    try { execFileSync('which', [name], { env: toolEnv, stdio: 'ignore' }); toolFound.set(name, true); } catch { toolFound.set(name, false); }
+  }
+  return toolFound.get(name);
 };
 const run = (cmd, args, timeout = 15_000) =>
   new Promise((resolve) => {
@@ -123,6 +129,18 @@ async function adbDevices() {
     return { serial, state, model };
   });
 }
+
+// Several open pages poll the phone; share one adb call between them for a little while.
+function shortCache(load, ms) {
+  let value = null, at = 0, pending = null;
+  return () => {
+    if (pending) return pending;
+    if (value && Date.now() - at < ms) return Promise.resolve(value);
+    pending = load().then((v) => { value = v; at = Date.now(); pending = null; return v; }, (e) => { pending = null; throw e; });
+    return pending;
+  };
+}
+const adbDevicesSoon = shortCache(adbDevices, 3_000);
 
 // In-browser phone streams, one per source, shared by every viewer tab.
 const streams = {};
@@ -149,6 +167,8 @@ async function phoneBattery() {
   return { level: Number.isFinite(level) ? level : null, charging: /(AC|USB|Wireless) powered: true/.test(out) };
 }
 
+const phoneBatterySoon = shortCache(phoneBattery, 20_000);
+
 let scrcpyProc = null;
 const SCREEN_APP = process.env.SCREEN_APP && existsSync(process.env.SCREEN_APP) ? process.env.SCREEN_APP : null;
 const closeScreen = () => {
@@ -160,17 +180,41 @@ const closeScreen = () => {
 // Websites other than our own pages that may use this app from the browser, e.g. an Ovelle page.
 const ALLOWED_ORIGINS = new Set((process.env.PHONEONDESK_ORIGINS || 'https://ovelle.me').split(',').map((o) => o.trim()).filter(Boolean));
 
-// Browsers send Origin on cross-site requests. Our own pages are same-origin; anything else must be
-// on the allow list. This stops an unrelated website you happen to visit from tapping your phone.
-function checkOrigin(req, res) {
-  const origin = req.headers.origin;
-  if (!origin) return true;
-  const self = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
-  if (origin === self) return true;
-  if (!ALLOWED_ORIGINS.has(origin)) {
-    res.writeHead(403).end('origin not allowed');
+// The names this app is reached by. Checking Host blocks DNS rebinding: a website that points its
+// own name at this computer would otherwise look same-origin to every check below.
+let knownHosts = null, knownHostsAt = 0;
+function hostAllowed(req) {
+  const host = String(req.headers.host || '').toLowerCase();
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+  if (!knownHosts || Date.now() - knownHostsAt > 10_000) {
+    const addrs = lanAddresses();
+    knownHosts = new Set(['localhost', '127.0.0.1', '[::1]', ...(localName ? [localName] : []), ...addrs.lan, ...addrs.tailscale]);
+    knownHostsAt = Date.now();
+  }
+  return knownHosts.has(name);
+}
+
+// Pages another website may simply link to; nothing else answers it without an allowed Origin.
+const PAGES = new Set(['/', '/view', '/cam', '/connected']);
+
+// Our own pages are same-origin. Another website gets in only from the allow list, and requests a
+// site sends without an Origin (an <img>, a link) may only open a page. So an unrelated site you
+// happen to visit can neither read anything nor tap, pair, wake or stop the phone.
+function checkOrigin(req, res, url) {
+  if (!hostAllowed(req)) {
+    res.writeHead(421).end('unknown host');
     return false;
   }
+  const origin = req.headers.origin;
+  const self = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
+  const allowed = Boolean(origin) && ALLOWED_ORIGINS.has(origin);
+  const site = req.headers['sec-fetch-site'];
+  const navigatesToPage = req.method === 'GET' && req.headers['sec-fetch-mode'] === 'navigate' && PAGES.has(url.pathname);
+  if ((origin && origin !== self && !allowed) || (!allowed && (site === 'cross-site' || site === 'same-site') && !navigatesToPage)) {
+    res.writeHead(403).end('not allowed from this website');
+    return false;
+  }
+  if (!allowed) return true;
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   if (req.method === 'OPTIONS') {
@@ -188,7 +232,7 @@ function checkOrigin(req, res) {
 
 function handle(req, res) {
   const url = new URL(req.url, 'https://x');
-  if (!checkOrigin(req, res)) return;
+  if (!checkOrigin(req, res, url)) return;
 
   if (req.method === 'POST' && url.pathname === '/frame') {
     const chunks = [];
@@ -233,6 +277,25 @@ function handle(req, res) {
   if (url.pathname === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify({ ...status, ageMs: status.at ? Date.now() - status.at : null }));
+  }
+
+  // For pages elsewhere (Ovelle) to check this app is here and what it can do.
+  if (url.pathname === '/hello') {
+    if (!isLoopback(req)) return json(res, 403, { error: 'Mac only' });
+    const phone = hasTool('adb') ? adbDevicesSoon() : Promise.resolve([]);
+    phone.then((devices) => {
+      const ready = devices.find((d) => d.state === 'device');
+      json(res, 200, { app: 'phoneOnDesk', version: VERSION, phone: ready ? { model: ready.model } : null, camera: { at: status.at } });
+    });
+    return;
+  }
+
+  // Where a browser lands after accepting this app's certificate once.
+  if (url.pathname === '/connected') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phoneOnDesk connected</title><body style="font:16px system-ui;background:#0b0b0c;color:#eee;display:grid;place-items:center;height:100vh;margin:0;text-align:center">
+<div><div style="font-size:40px">✓</div><h1 style="font-size:20px">This browser can now reach phoneOnDesk</h1><p style="opacity:.7">Close this tab and go back to your page.</p></div>`);
   }
 
   if (url.pathname === '/info') {
@@ -292,13 +355,13 @@ function handle(req, res) {
     }
 
     if (url.pathname === '/phone/battery') {
-      phoneBattery().then((b) => json(res, 200, b));
+      phoneBatterySoon().then((b) => json(res, 200, b));
       return;
     }
 
     if (url.pathname === '/adb' && req.method === 'GET') {
       if (!hasTool('adb') || !hasTool('scrcpy')) return json(res, 200, { tools: false, devices: [] });
-      adbDevices().then((devices) => json(res, 200, { tools: true, devices, screenOpen: !!scrcpyProc }));
+      adbDevicesSoon().then((devices) => json(res, 200, { tools: true, devices, screenOpen: !!scrcpyProc }));
       return;
     }
 
