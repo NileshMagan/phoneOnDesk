@@ -3,6 +3,8 @@
 // Stream framing from the server: [u8 type][u32 length][payload]. See phone-stream.mjs.
 
 const MSG = { META: 0, CONFIG: 1, KEY: 2, DELTA: 3, END: 4 };
+// Where phoneOnDesk is. Empty on its own pages; a page hosted elsewhere sets window.PHONE_BASE.
+const PHONE_BASE = window.PHONE_BASE || '';
 
 // "avc1.PPCCLL" from the SPS inside an Annex B config packet.
 function avcCodec(config) {
@@ -32,7 +34,7 @@ class PhoneVideo {
   async start() {
     if (!('VideoDecoder' in window)) throw new Error('This browser cannot decode video (no WebCodecs). Try Chrome.');
     this.abort = new AbortController();
-    const r = await fetch(`/phone/stream?source=${this.source}`, { signal: this.abort.signal });
+    const r = await fetch(`${PHONE_BASE}/phone/stream?source=${this.source}`, { signal: this.abort.signal });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
     this.#read(r.body.getReader()).catch((e) => {
       if (!this.closed) this.onEnd?.(e.message);
@@ -193,7 +195,7 @@ function sendControl(...msgs) {
   if (controlQueue.length === msgs.length) {
     requestAnimationFrame(() => {
       const parts = controlQueue.splice(0);
-      fetch('/phone/control', { method: 'POST', body: new Blob(parts) }).catch(() => {});
+      fetch(`${PHONE_BASE}/phone/control`, { method: 'POST', body: new Blob(parts) }).catch(() => {});
     });
   }
 }

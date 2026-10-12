@@ -126,7 +126,8 @@ async function adbDevices() {
 
 // In-browser phone streams, one per source, shared by every viewer tab.
 const streams = {};
-const STREAM_PORTS = { display: 27183, camera: 27184 };
+const STREAM_PORT = Number(process.env.CAM_STREAM_PORT || 27183);
+const STREAM_PORTS = { display: STREAM_PORT, camera: STREAM_PORT + 1 };
 async function getStream(source) {
   const existing = streams[source];
   if (existing && !existing.stopped) return existing.start().then(() => existing);
@@ -156,8 +157,38 @@ const closeScreen = () => {
   try { execFileSync('pkill', ['-f', 'scrcpy .*--window-title=Phone screen']); } catch {}
 };
 
+// Websites other than our own pages that may use this app from the browser, e.g. an Ovelle page.
+const ALLOWED_ORIGINS = new Set((process.env.PHONEONDESK_ORIGINS || 'https://ovelle.me').split(',').map((o) => o.trim()).filter(Boolean));
+
+// Browsers send Origin on cross-site requests. Our own pages are same-origin; anything else must be
+// on the allow list. This stops an unrelated website you happen to visit from tapping your phone.
+function checkOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  const self = `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
+  if (origin === self) return true;
+  if (!ALLOWED_ORIGINS.has(origin)) {
+    res.writeHead(403).end('origin not allowed');
+    return false;
+  }
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Methods': 'GET, POST',
+      'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'content-type',
+      // Chrome's check before a public website may reach a program on this computer.
+      'Access-Control-Allow-Private-Network': 'true',
+      'Access-Control-Max-Age': '600',
+    }).end();
+    return false;
+  }
+  return true;
+}
+
 function handle(req, res) {
   const url = new URL(req.url, 'https://x');
+  if (!checkOrigin(req, res)) return;
 
   if (req.method === 'POST' && url.pathname === '/frame') {
     const chunks = [];
