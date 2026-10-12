@@ -5,10 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>phoneOnDesk</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/phone-video.js"></script>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0c; color: #eee; font: 15px system-ui, sans-serif; }
-  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #wrap { position: fixed; inset: 0; display: flex; gap: 12px; padding: 56px 12px 12px; box-sizing: border-box; }
+  #camPane { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; position: relative; }
   img#img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #camCanvas { display: none; }
+  body.direct img#img { display: none; }
+  body.direct #camCanvas { display: block; }
+  #phonePane { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 0; }
+  #phonePane[hidden] { display: none; }
+  #phoneBox { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  #phoneCanvas { border-radius: 18px; background: #000; cursor: pointer; outline: none; touch-action: none; }
+  #phoneCanvas:focus { box-shadow: 0 0 0 2px #2d7ff9; }
+  #phoneNav { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  #phoneNav button { padding: 5px 12px; }
+  #phoneMsg { position: absolute; opacity: .7; text-align: center; padding: 0 12px; }
   #bar { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items: center; z-index: 5; flex-wrap: wrap; }
   .pill { background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 999px; backdrop-filter: blur(6px); }
   .low { color: #ff6b6b; }
@@ -44,11 +57,27 @@
 </style>
 </head>
 <body>
-<div id="wrap"><img id="img" alt="Phone camera"></div>
+<div id="wrap">
+  <div id="camPane"><img id="img" alt="Phone camera"><canvas id="camCanvas"></canvas></div>
+  <div id="phonePane" hidden>
+    <div id="phoneBox"><canvas id="phoneCanvas" tabindex="0" width="360" height="780"></canvas><span id="phoneMsg">Connecting…</span></div>
+    <div id="phoneNav">
+      <button data-key="BACK" title="Back (or right-click the screen)">◀</button>
+      <button data-key="HOME" title="Home">●</button>
+      <button data-key="APP_SWITCH" title="Recent apps">▮▮</button>
+      <button data-key="VOLUME_DOWN" title="Volume down">🔉</button>
+      <button data-key="VOLUME_UP" title="Volume up">🔊</button>
+      <button data-key="POWER" title="Screen on/off">⏻</button>
+      <button id="popOut" title="Open in its own window">⧉</button>
+    </div>
+  </div>
+</div>
 
 <div id="bar">
   <span class="pill" id="bat">🔋 –</span>
   <span class="pill" id="age">waiting for phone</span>
+  <button id="camMode" title="Chrome page: the phone streams from its browser tab. Direct: straight from the camera over the debugging link, keeps running while you use other apps.">Camera: Chrome page</button>
+  <button id="rotateBtn" hidden title="Rotate the camera picture">⟳</button>
   <span class="spacer"></span>
   <button id="clipBtn">Clipboard</button>
   <button id="screenBtn">Phone screen</button>
@@ -204,7 +233,14 @@ $('sendPhone').onclick = async () => { await sendToPhone($('toPhone').value); $(
 document.addEventListener('paste', (e) => {
   if (e.target.closest('textarea, input')) return;
   const text = e.clipboardData.getData('text');
-  if (text) { e.preventDefault(); sendToPhone(text); }
+  if (!text) return;
+  e.preventDefault();
+  // Pasting while the phone screen has focus types straight into the phone.
+  if (document.activeElement === $('phoneCanvas') && phoneVideo) {
+    for (let i = 0; i < text.length; i += 300) sendControl(control.text(text.slice(i, i + 300)));
+  } else {
+    sendToPhone(text);
+  }
 });
 
 async function pollClip() {
@@ -223,11 +259,31 @@ async function pollClip() {
   if (!copied) toast('Text arrived from your phone');
 }
 
-// ---------- Phone screen ----------
+// ---------- Layout ----------
+const pref = {
+  get(k, d) { try { return localStorage.getItem('pod.' + k) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('pod.' + k, v); } catch {} },
+};
+function fitCanvas(canvas, availW, availH) {
+  const w = canvas.width, h = canvas.height;
+  if (!w || !h || availW <= 0 || availH <= 0) return;
+  const sc = Math.min(availW / w, availH / h);
+  canvas.style.width = Math.floor(w * sc) + 'px';
+  canvas.style.height = Math.floor(h * sc) + 'px';
+}
+function fitAll() {
+  if (!$('phonePane').hidden) fitCanvas($('phoneCanvas'), $('wrap').clientWidth * 0.45, $('phoneBox').clientHeight);
+  if (camMode === 'direct') fitCanvas($('camCanvas'), $('camPane').clientWidth, $('camPane').clientHeight);
+}
+const ro = new ResizeObserver(() => requestAnimationFrame(fitAll));
+['wrap', 'camPane', 'phoneBox'].forEach((id) => ro.observe($(id)));
+
+// ---------- Phone pairing ----------
 async function adbState() {
   const r = await fetch('/adb');
   return r.json();
 }
+const phoneReady = (s) => s.tools && s.devices.some((d) => d.state === 'device');
 function renderDev(s) {
   const el = $('devState');
   if (!s.tools) {
@@ -239,8 +295,8 @@ function renderDev(s) {
   const waiting = s.devices.find((d) => d.state === 'unauthorized');
   $('pairSteps').hidden = !!ready;
   if (ready) {
-    el.innerHTML = `Connected: <b>${ready.model}</b> &nbsp; <button class="primary" id="openScreen">${s.screenOpen ? 'Screen is open' : 'Open screen'}</button>`;
-    $('openScreen').onclick = openScreen;
+    el.innerHTML = `Connected: <b>${ready.model}</b> &nbsp; <button class="primary" id="showPhone">Show phone screen</button>`;
+    $('showPhone').onclick = () => { $('screen').hidden = true; openPhonePane(); };
   } else if (waiting) {
     el.textContent = 'Check the phone and tap Allow on the debugging prompt.';
   } else {
@@ -248,20 +304,6 @@ function renderDev(s) {
   }
   return ready;
 }
-async function openScreen() {
-  const r = await (await fetch('/screen', { method: 'POST' })).json();
-  toast(r.out);
-  if (r.ok) $('screen').hidden = true;
-  return r.ok;
-}
-$('screenBtn').onclick = async () => {
-  const s = await adbState();
-  if (s.tools && s.devices.some((d) => d.state === 'device')) {
-    if (await openScreen()) return;
-  }
-  renderDev(s);
-  $('screen').hidden = false;
-};
 async function adbAction(path, body) {
   $('adbOut').textContent = 'Working…';
   const r = await (await fetch(path, { method: 'POST', body: JSON.stringify(body) })).json();
@@ -272,30 +314,174 @@ $('pairBtn').onclick = () => adbAction('/adb/pair', { target: $('pairTarget').va
 $('connBtn').onclick = () => adbAction('/adb/connect', { target: $('connTarget').value.trim() });
 setInterval(async () => { if (!$('screen').hidden) renderDev(await adbState()); }, 3000);
 
-// ---------- Camera status ----------
+// ---------- Phone screen, in the page ----------
+let phoneVideo = null, phoneWanted = false;
+const pc = $('phoneCanvas');
+
+async function openPhonePane() {
+  const s = await adbState();
+  if (!phoneReady(s)) { renderDev(s); $('screen').hidden = false; return; }
+  phoneWanted = true;
+  pref.set('phoneOpen', '1');
+  $('phonePane').hidden = false;
+  $('screenBtn').classList.add('primary');
+  fitAll();
+  startPhone();
+}
+function closePhonePane() {
+  phoneWanted = false;
+  pref.set('phoneOpen', '0');
+  phoneVideo?.stop();
+  phoneVideo = null;
+  $('phonePane').hidden = true;
+  $('screenBtn').classList.remove('primary');
+}
+function startPhone() {
+  phoneVideo?.stop();
+  $('phoneMsg').hidden = false;
+  $('phoneMsg').textContent = 'Connecting…';
+  const retry = (reason) => {
+    if (!phoneWanted) return;
+    $('phoneMsg').hidden = false;
+    $('phoneMsg').textContent = `Reconnecting… (${reason})`;
+    setTimeout(() => phoneWanted && startPhone(), 3000);
+  };
+  const video = new PhoneVideo('display', pc, {
+    onFrameSize: () => { $('phoneMsg').hidden = true; fitAll(); },
+    onEnd: (reason) => video === phoneVideo && retry(reason),
+  });
+  phoneVideo = video;
+  video.start().catch((e) => video === phoneVideo && retry(e.message));
+}
+$('screenBtn').onclick = () => (phoneWanted ? closePhonePane() : openPhonePane());
+$('popOut').onclick = async () => toast((await (await fetch('/screen', { method: 'POST' })).json()).out);
+document.querySelectorAll('#phoneNav [data-key]').forEach((b) => (b.onclick = () => pressKey(KEY[b.dataset.key])));
+
+// Mouse → touch. Positions are in the phone's video pixels.
+function phonePos(e) {
+  const r = pc.getBoundingClientRect();
+  const w = phoneVideo.frameW, h = phoneVideo.frameH;
+  const x = Math.min(w - 1, Math.max(0, ((e.clientX - r.left) / r.width) * w));
+  const y = Math.min(h - 1, Math.max(0, ((e.clientY - r.top) / r.height) * h));
+  return [x, y, w, h];
+}
+let touching = false;
+pc.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || !phoneVideo?.frameW) return;
+  pc.focus();
+  pc.setPointerCapture(e.pointerId);
+  touching = true;
+  sendControl(control.touch(0, ...phonePos(e)));
+  e.preventDefault();
+});
+pc.addEventListener('pointermove', (e) => { if (touching) sendControl(control.touch(2, ...phonePos(e))); });
+const lift = (e) => { if (touching) { touching = false; sendControl(control.touch(1, ...phonePos(e))); } };
+pc.addEventListener('pointerup', lift);
+pc.addEventListener('pointercancel', lift);
+pc.addEventListener('contextmenu', (e) => { e.preventDefault(); pressKey(KEY.BACK); });
+pc.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (!phoneVideo?.frameW) return;
+  const [x, y, w, h] = phonePos(e);
+  sendControl(control.scroll(x, y, w, h, -e.deltaX / 100, -e.deltaY / 100));
+}, { passive: false });
+pc.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || !phoneVideo) return; // leave ⌘V etc. to the paste handler
+  const special = { Backspace: 'DEL', Enter: 'ENTER', Tab: 'TAB', Escape: 'BACK', Delete: 'FORWARD_DEL',
+    ArrowUp: 'DPAD_UP', ArrowDown: 'DPAD_DOWN', ArrowLeft: 'DPAD_LEFT', ArrowRight: 'DPAD_RIGHT', Home: 'MOVE_HOME', End: 'MOVE_END' };
+  if (special[e.key]) pressKey(KEY[special[e.key]]);
+  else if (e.key.length === 1) sendControl(control.text(e.key));
+  else return;
+  e.preventDefault();
+});
+
+// ---------- Camera source ----------
+let camMode = 'page', camVideo = null, camRotate = Number(pref.get('camRotate', '0'));
+async function setCamMode(mode, quiet) {
+  camVideo?.stop();
+  camVideo = null;
+  if (mode === 'direct') {
+    const s = await adbState();
+    if (!phoneReady(s)) {
+      if (!quiet) { toast('Pair the phone first'); renderDev(s); $('screen').hidden = false; }
+      mode = 'page';
+    }
+  }
+  camMode = mode;
+  pref.set('camMode', mode);
+  document.body.classList.toggle('direct', mode === 'direct');
+  $('camMode').textContent = 'Camera: ' + (mode === 'direct' ? 'Direct' : 'Chrome page');
+  $('rotateBtn').hidden = mode !== 'direct';
+  if (mode === 'direct') {
+    setup.hidden = true;
+    startCam();
+    if (!quiet) toast('Direct camera on. You can close the camera tab on the phone.');
+  }
+  poll();
+}
+function startCam() {
+  const video = new PhoneVideo('camera', $('camCanvas'), {
+    onFrameSize: fitAll,
+    onEnd: (reason) => {
+      if (video !== camVideo) return;
+      $('age').textContent = 'camera reconnecting…';
+      setTimeout(() => video === camVideo && startCam(), 3000);
+      console.log('camera stream ended:', reason);
+    },
+  });
+  video.setRotate(camRotate);
+  camVideo = video;
+  video.start().catch((e) => { if (video === camVideo) video.onEnd(e.message); });
+}
+$('camMode').onclick = () => setCamMode(camMode === 'direct' ? 'page' : 'direct');
+$('rotateBtn').onclick = () => {
+  camRotate = (camRotate + 90) % 360;
+  pref.set('camRotate', camRotate);
+  camVideo?.setRotate(camRotate);
+  fitAll();
+};
+
+// ---------- Status ----------
+let directBatteryAt = 0;
 async function poll() {
   if (stopped) return;
   try {
-    const s = await (await fetch('/status')).json();
     const bat = $('bat');
     const age = $('age');
-    if (s.at && !gotFrame) { gotFrame = true; if (!dismissed) setup.hidden = true; }
-    if (!s.at && !dismissed) setup.hidden = false;
-    if (s.level != null) {
-      bat.textContent = `${s.charging ? '⚡' : '🔋'} ${s.level}%`;
-      bat.className = 'pill' + (s.level <= 20 && !s.charging ? ' low' : '');
-    }
-    if (s.ageMs != null) {
-      const sec = Math.round(s.ageMs / 1000);
-      age.textContent = sec < 5 ? '● live' : `last frame ${sec < 60 ? sec + 's' : Math.round(sec / 60) + 'm'} ago`;
-      age.className = 'pill' + (sec >= 5 ? ' stale' : '');
+    const showBattery = (level, charging) => {
+      if (level == null) return;
+      bat.textContent = `${charging ? '⚡' : '🔋'} ${level}%`;
+      bat.className = 'pill' + (level <= 20 && !charging ? ' low' : '');
+    };
+    if (camMode === 'direct') {
+      if (Date.now() - directBatteryAt > 30_000) {
+        directBatteryAt = Date.now();
+        const b = await (await fetch('/phone/battery')).json();
+        showBattery(b.level, b.charging);
+      }
+      const sec = camVideo?.lastAt ? Math.round((Date.now() - camVideo.lastAt) / 1000) : null;
+      age.textContent = sec == null ? 'camera connecting…' : sec < 5 ? '● live' : `last frame ${sec}s ago`;
+      age.className = 'pill' + (sec == null || sec >= 5 ? ' stale' : '');
+    } else {
+      const s = await (await fetch('/status')).json();
+      if (s.at && !gotFrame) { gotFrame = true; if (!dismissed) setup.hidden = true; }
+      if (!s.at && !dismissed) setup.hidden = false;
+      showBattery(s.level, s.charging);
+      if (s.ageMs != null) {
+        const sec = Math.round(s.ageMs / 1000);
+        age.textContent = sec < 5 ? '● live' : `last frame ${sec < 60 ? sec + 's' : Math.round(sec / 60) + 'm'} ago`;
+        age.className = 'pill' + (sec >= 5 ? ' stale' : '');
+      }
     }
     await pollClip();
   } catch {
     $('stopped').style.display = 'flex';
   }
 }
-poll();
+
+// Restore last session's choices.
+if (pref.get('camMode', 'page') === 'direct') setCamMode('direct', true); else poll();
+if (pref.get('phoneOpen', '0') === '1') openPhonePane();
 setInterval(poll, 2000);
 </script>
 </body>

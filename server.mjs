@@ -7,6 +7,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { PhoneStream } from './phone-stream.mjs';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.CAM_HTTPS_PORT || 8443);
@@ -72,6 +73,7 @@ function scheduleQuit() {
 function shutdown(reason) {
   console.log(`stopping: ${reason}`);
   closeScreen();
+  for (const st of Object.values(streams)) st.stop('server stopping');
   process.exit(0);
 }
 
@@ -120,6 +122,30 @@ async function adbDevices() {
     const model = (l.match(/model:(\S+)/) || [])[1]?.replace(/_/g, ' ') || serial;
     return { serial, state, model };
   });
+}
+
+// In-browser phone streams, one per source, shared by every viewer tab.
+const streams = {};
+const STREAM_PORTS = { display: 27183, camera: 27184 };
+async function getStream(source) {
+  const existing = streams[source];
+  if (existing && !existing.stopped) return existing.start().then(() => existing);
+  const device = (await adbDevices()).find((d) => d.state === 'device');
+  if (!device) throw new Error('No phone connected. Pair it first.');
+  const stream = new PhoneStream({ serial: device.serial, source, port: STREAM_PORTS[source], env: toolEnv });
+  stream.onEnd = (reason) => {
+    console.log(`${source} stream ended: ${reason}`);
+    if (streams[source] === stream) delete streams[source];
+  };
+  streams[source] = stream;
+  await stream.start();
+  return stream;
+}
+
+async function phoneBattery() {
+  const { out } = await run('adb', ['shell', 'dumpsys', 'battery']);
+  const level = Number(out.match(/\blevel: (\d+)/)?.[1]);
+  return { level: Number.isFinite(level) ? level : null, charging: /(AC|USB|Wireless) powered: true/.test(out) };
 }
 
 let scrcpyProc = null;
@@ -208,8 +234,36 @@ function handle(req, res) {
   }
 
   // Phone-control endpoints only answer the Mac itself, never the network.
-  if (url.pathname.startsWith('/adb') || url.pathname === '/screen') {
+  if (url.pathname.startsWith('/adb') || url.pathname === '/screen' || url.pathname.startsWith('/phone/')) {
     if (!isLoopback(req)) return json(res, 403, { error: 'Mac only' });
+
+    if (url.pathname === '/phone/stream') {
+      const source = url.searchParams.get('source') === 'camera' ? 'camera' : 'display';
+      getStream(source).then(
+        (stream) => {
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' });
+          const remove = stream.addClient(res);
+          req.on('close', remove);
+        },
+        (e) => json(res, 409, { error: e.message }),
+      );
+      return;
+    }
+
+    if (url.pathname === '/phone/control' && req.method === 'POST') {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        streams.display?.sendControl(Buffer.concat(chunks));
+        res.writeHead(204).end();
+      });
+      return;
+    }
+
+    if (url.pathname === '/phone/battery') {
+      phoneBattery().then((b) => json(res, 200, b));
+      return;
+    }
 
     if (url.pathname === '/adb' && req.method === 'GET') {
       if (!hasTool('adb') || !hasTool('scrcpy')) return json(res, 200, { tools: false, devices: [] });
@@ -255,10 +309,11 @@ function handle(req, res) {
     }
   }
 
-  const html = { '/': 'view.html', '/view': 'view.html', '/cam': 'cam.html' }[url.pathname];
-  if (html) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-    return res.end(page(html));
+  const file = { '/': 'view.html', '/view': 'view.html', '/cam': 'cam.html', '/phone-video.js': 'phone-video.js' }[url.pathname];
+  if (file) {
+    const type = file.endsWith('.js') ? 'text/javascript' : 'text/html';
+    res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-store' });
+    return res.end(page(file));
   }
   res.writeHead(404).end();
 }
