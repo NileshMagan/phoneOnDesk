@@ -2,50 +2,66 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>phoneOnDesk</title>
 <style>
-  body { margin: 0; background: #111; color: #eee; font: 16px system-ui, sans-serif; text-align: center; }
-  video { width: 100%; max-height: 55vh; background: #000; }
-  button { font-size: 18px; padding: 12px 22px; margin: 8px; border-radius: 12px; border: 0; background: #2d7ff9; color: #fff; }
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 16px system-ui, sans-serif; overflow: hidden; }
+  /* The camera fills the screen, so mirroring the phone screen shows it nearly full size too. */
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #bar { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); display: flex; gap: 8px; align-items: center;
+         background: rgba(20,20,24,.75); backdrop-filter: blur(8px); border-radius: 14px; padding: 8px; transition: opacity .3s; }
+  body.live #bar { opacity: .35; }
+  body.live.showbar #bar { opacity: 1; }
+  #bar.hidden { opacity: 0 !important; pointer-events: none; }
+  button { font-size: 16px; padding: 10px 16px; border-radius: 10px; border: 0; background: #2d7ff9; color: #fff; }
   button.alt { background: #2a2a2e; }
-  select { font-size: 16px; padding: 6px; }
-  #info { opacity: .8; padding: 0 16px; }
-  .clip { margin: 12px 16px; padding: 12px 14px; background: #1b1b1f; border: 1px solid #2a2a2e; border-radius: 12px; text-align: left; }
-  .clip h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; opacity: .6; margin: 0 0 8px; }
-  .clip pre { white-space: pre-wrap; word-break: break-word; font: 15px system-ui, sans-serif; margin: 0 0 8px; max-height: 30vh; overflow: auto; }
-  .clip button { margin: 4px 8px 0 0; font-size: 16px; padding: 10px 16px; }
+  button.dot::after { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #2d7ff9; margin-left: 6px; vertical-align: middle; }
+  select { font-size: 15px; padding: 6px; background: #2a2a2e; color: #eee; border: 0; border-radius: 8px; }
+  #info { flex: 1; min-width: 0; font-size: 13px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #intro { position: fixed; left: 16px; right: 16px; top: 40%; text-align: center; opacity: .8; }
+  body.live #intro { display: none; }
+  #clipPanel { position: fixed; left: 8px; right: 8px; bottom: calc(76px + env(safe-area-inset-bottom)); background: rgba(20,20,24,.95);
+               border-radius: 14px; padding: 12px 14px; max-height: 60vh; overflow: auto; }
+  #clipPanel[hidden] { display: none; }
+  .clip h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; opacity: .6; margin: 4px 0 8px; }
+  .clip pre { white-space: pre-wrap; word-break: break-word; font: 15px system-ui, sans-serif; margin: 0 0 8px; max-height: 25vh; overflow: auto; }
+  .clip button { margin: 0 8px 8px 0; font-size: 15px; padding: 8px 14px; }
   textarea { width: 100%; box-sizing: border-box; font: 15px system-ui, sans-serif; background: #111; color: #eee; border: 1px solid #333; border-radius: 8px; padding: 8px; }
   .muted { opacity: .6; font-size: 13px; }
 </style>
 </head>
 <body>
 <video id="v" playsinline muted autoplay></video>
-<div>
-  <button id="go">Start streaming</button>
-  <label>Speed <select id="q">
+<div id="intro">Point the camera at what you want to watch, then tap Start.<br>Keep this tab open in front.</div>
+
+<div id="clipPanel" hidden>
+  <div class="clip">
+    <h2>From Mac</h2>
+    <pre id="fromMac" class="muted">Nothing yet. On the Mac, press ⌘V on the phoneOnDesk page to send text here.</pre>
+    <button id="copyMac" class="alt" hidden>Copy</button>
+  </div>
+  <div class="clip">
+    <h2>To Mac</h2>
+    <button id="sendClip">Send my clipboard</button>
+    <div id="manual" hidden>
+      <p class="muted">Chrome didn't allow clipboard access. Paste here instead:</p>
+      <textarea id="manualText" rows="3"></textarea>
+      <button id="sendManual">Send</button>
+    </div>
+    <p class="muted" id="clipInfo"></p>
+  </div>
+</div>
+
+<div id="bar">
+  <button id="go">Start</button>
+  <select id="q" title="Frames per second">
     <option value="1">1 fps</option>
     <option value="2" selected>2 fps</option>
     <option value="5">5 fps</option>
-  </select></label>
-</div>
-<p id="info">Point the camera at what you want to watch, then tap Start. Keep this tab open in front.</p>
-
-<div class="clip">
-  <h2>From Mac</h2>
-  <pre id="fromMac" class="muted">Nothing yet. On the Mac, press ⌘V on the phoneOnDesk page to send text here.</pre>
-  <button id="copyMac" class="alt" hidden>Copy</button>
-</div>
-
-<div class="clip">
-  <h2>To Mac</h2>
-  <button id="sendClip">Send my clipboard</button>
-  <div id="manual" hidden>
-    <p class="muted">Chrome didn't allow clipboard access. Paste here instead:</p>
-    <textarea id="manualText" rows="3"></textarea>
-    <button id="sendManual">Send</button>
-  </div>
-  <p class="muted" id="clipInfo"></p>
+  </select>
+  <span id="info"></span>
+  <button id="clipBtn" class="alt">Clipboard</button>
+  <button id="fsBtn" class="alt" title="Full screen">⛶</button>
 </div>
 
 <script>
@@ -77,12 +93,24 @@ document.addEventListener('visibilitychange', async () => {
   }
 });
 
+// Full screen hides Chrome's address bar and Android's nav bar, so a mirrored phone screen
+// is nearly all camera. Needs a tap to enter, so Start does it.
+function toggleFullscreen(on = !document.fullscreenElement) {
+  if (on) document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+  else document.exitFullscreen?.().catch(() => {});
+}
+document.getElementById('fsBtn').onclick = () => toggleFullscreen();
+
 async function start() {
+  toggleFullscreen(true);
   await openCamera();
   try { battery = await navigator.getBattery(); } catch {}
   await lockScreen();
   running = true;
-  document.getElementById('go').textContent = 'Streaming…';
+  document.body.classList.add('live');
+  const go = document.getElementById('go');
+  go.textContent = 'Live';
+  go.classList.add('alt');
   loop();
 }
 
@@ -103,7 +131,7 @@ async function loop() {
       try {
         await fetch('/frame?' + qs, { method: 'POST', body: blob });
         sent++;
-        info.textContent = `Sent ${sent} frames` + (battery ? ` · battery ${Math.round(battery.level * 100)}%` : '');
+        info.textContent = `● ${sent} sent` + (battery ? ` · ${Math.round(battery.level * 100)}%` : '');
       } catch (e) {
         info.textContent = 'Can\'t reach the Mac. Is the phoneOnDesk app open there? Retrying…';
       }
@@ -117,9 +145,33 @@ document.getElementById('go').onclick = () => {
   if (!running) start().catch((e) => (info.textContent = 'Camera error: ' + e.message));
 };
 
+// Once live, the bar fades so the camera has the screen. Tap the picture to bring it back
+// (or tuck it away completely with a second tap).
+let barTimer;
+v.addEventListener('click', () => {
+  if (!running) return;
+  const bar = document.getElementById('bar');
+  if (document.body.classList.contains('showbar')) {
+    document.body.classList.remove('showbar');
+    bar.classList.toggle('hidden');
+    document.getElementById('clipPanel').hidden = true;
+    return;
+  }
+  bar.classList.remove('hidden');
+  document.body.classList.add('showbar');
+  clearTimeout(barTimer);
+  barTimer = setTimeout(() => document.body.classList.remove('showbar'), 4000);
+});
+
 // Clipboard
 const clipInfo = document.getElementById('clipInfo');
+const clipBtn = document.getElementById('clipBtn');
 let macText = '', macAt = 0;
+clipBtn.onclick = () => {
+  const panel = document.getElementById('clipPanel');
+  panel.hidden = !panel.hidden;
+  clipBtn.classList.remove('dot');
+};
 
 async function sendToMac(text) {
   if (!text) { clipInfo.textContent = 'Clipboard is empty.'; return; }
@@ -157,12 +209,16 @@ async function pollClip() {
   try {
     const { toPhone } = await (await fetch('/clip')).json();
     if (toPhone.at && toPhone.at !== macAt) {
+      const first = macAt === 0;
       macAt = toPhone.at;
       macText = toPhone.text;
       const pre = document.getElementById('fromMac');
       pre.textContent = macText;
       pre.classList.remove('muted');
       document.getElementById('copyMac').hidden = false;
+      if (first && Date.now() - toPhone.at > 10_000) return; // Old text from before this tab opened.
+      if (document.getElementById('clipPanel').hidden) clipBtn.classList.add('dot');
+      document.getElementById('bar').classList.remove('hidden');
       if (navigator.vibrate) navigator.vibrate(60);
     }
   } catch {}

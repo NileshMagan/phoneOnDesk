@@ -9,6 +9,9 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0c; color: #eee; font: 15px system-ui, sans-serif; }
   #wrap { position: fixed; inset: 0; display: flex; gap: 12px; padding: 56px 12px 12px; box-sizing: border-box; }
+  #wrap { justify-content: center; }
+  #camPane[hidden] { display: none; }
+  #empty { margin: auto; opacity: .6; text-align: center; }
   #camPane { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; position: relative; }
   img#img { max-width: 100%; max-height: 100%; object-fit: contain; }
   #camCanvas { display: none; }
@@ -58,6 +61,7 @@
 </head>
 <body>
 <div id="wrap">
+  <div id="empty" hidden>Everything's switched off. Turn on <b>Camera</b> or <b>Phone screen</b> above.</div>
   <div id="camPane"><img id="img" alt="Phone camera"><canvas id="camCanvas"></canvas></div>
   <div id="phonePane" hidden>
     <div id="phoneBox"><canvas id="phoneCanvas" tabindex="0" width="360" height="780"></canvas><span id="phoneMsg">Connecting…</span></div>
@@ -76,6 +80,7 @@
 <div id="bar">
   <span class="pill" id="bat">🔋 –</span>
   <span class="pill" id="age">waiting for phone</span>
+  <button id="camBtn" class="primary" title="Show or hide the camera">Camera</button>
   <button id="camMode" title="Chrome page: the phone streams from its browser tab. Direct: straight from the camera over the debugging link, keeps running while you use other apps.">Camera: Chrome page</button>
   <button id="rotateBtn" hidden title="Rotate the camera picture">⟳</button>
   <span class="spacer"></span>
@@ -272,8 +277,9 @@ function fitCanvas(canvas, availW, availH) {
   canvas.style.height = Math.floor(h * sc) + 'px';
 }
 function fitAll() {
-  if (!$('phonePane').hidden) fitCanvas($('phoneCanvas'), $('wrap').clientWidth * 0.45, $('phoneBox').clientHeight);
-  if (camMode === 'direct') fitCanvas($('camCanvas'), $('camPane').clientWidth, $('camPane').clientHeight);
+  const camShown = !$('camPane').hidden;
+  if (!$('phonePane').hidden) fitCanvas($('phoneCanvas'), $('wrap').clientWidth * (camShown ? 0.45 : 1) - 24, $('phoneBox').clientHeight);
+  if (camShown && camMode === 'direct') fitCanvas($('camCanvas'), $('camPane').clientWidth, $('camPane').clientHeight);
 }
 const ro = new ResizeObserver(() => requestAnimationFrame(fitAll));
 ['wrap', 'camPane', 'phoneBox'].forEach((id) => ro.observe($(id)));
@@ -324,6 +330,7 @@ async function openPhonePane() {
   phoneWanted = true;
   pref.set('phoneOpen', '1');
   $('phonePane').hidden = false;
+  updateEmpty();
   $('screenBtn').classList.add('primary');
   fitAll();
   startPhone();
@@ -335,6 +342,7 @@ function closePhonePane() {
   phoneVideo = null;
   $('phonePane').hidden = true;
   $('screenBtn').classList.remove('primary');
+  updateEmpty();
 }
 function startPhone() {
   phoneVideo?.stop();
@@ -411,10 +419,10 @@ async function setCamMode(mode, quiet) {
   pref.set('camMode', mode);
   document.body.classList.toggle('direct', mode === 'direct');
   $('camMode').textContent = 'Camera: ' + (mode === 'direct' ? 'Direct' : 'Chrome page');
-  $('rotateBtn').hidden = mode !== 'direct';
+  $('rotateBtn').hidden = mode !== 'direct' || !camShown();
   if (mode === 'direct') {
     setup.hidden = true;
-    startCam();
+    if (camShown()) startCam();
     if (!quiet) toast('Direct camera on. You can close the camera tab on the phone.');
   }
   poll();
@@ -433,6 +441,24 @@ function startCam() {
   camVideo = video;
   video.start().catch((e) => { if (video === camVideo) video.onEnd(e.message); });
 }
+// Camera on/off. Off also stops the direct stream, which frees the phone's camera.
+const camShown = () => !$('camPane').hidden;
+function updateEmpty() {
+  $('empty').hidden = camShown() || !$('phonePane').hidden;
+}
+function setCamShown(show) {
+  $('camPane').hidden = !show;
+  pref.set('camShown', show ? '1' : '0');
+  $('camBtn').classList.toggle('primary', show);
+  $('camMode').hidden = !show;
+  $('age').hidden = !show;
+  $('rotateBtn').hidden = !show || camMode !== 'direct';
+  if (!show) { camVideo?.stop(); camVideo = null; setup.hidden = true; }
+  else if (camMode === 'direct' && !camVideo) startCam();
+  updateEmpty();
+  fitAll();
+}
+$('camBtn').onclick = () => setCamShown(!camShown());
 $('camMode').onclick = () => setCamMode(camMode === 'direct' ? 'page' : 'direct');
 $('rotateBtn').onclick = () => {
   camRotate = (camRotate + 90) % 360;
@@ -465,7 +491,7 @@ async function poll() {
     } else {
       const s = await (await fetch('/status')).json();
       if (s.at && !gotFrame) { gotFrame = true; if (!dismissed) setup.hidden = true; }
-      if (!s.at && !dismissed) setup.hidden = false;
+      if (!s.at && !dismissed && camShown()) setup.hidden = false;
       showBattery(s.level, s.charging);
       if (s.ageMs != null) {
         const sec = Math.round(s.ageMs / 1000);
@@ -480,6 +506,7 @@ async function poll() {
 }
 
 // Restore last session's choices.
+if (pref.get('camShown', '1') === '0') setCamShown(false);
 if (pref.get('camMode', 'page') === 'direct') setCamMode('direct', true); else poll();
 if (pref.get('phoneOpen', '0') === '1') openPhonePane();
 setInterval(poll, 2000);
