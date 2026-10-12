@@ -72,7 +72,6 @@
       <button data-key="VOLUME_DOWN" title="Volume down">🔉</button>
       <button data-key="VOLUME_UP" title="Volume up">🔊</button>
       <button data-key="POWER" title="Screen on/off">⏻</button>
-      <button id="popOut" title="Open in its own window">⧉</button>
     </div>
   </div>
 </div>
@@ -139,7 +138,7 @@
         <div class="muted">A USB cable works too: plug in, then tap <b>Allow USB debugging</b> on the phone.</div>
       </div>
       <div class="muted">
-        The screen opens in its own window. Click to tap, scroll to swipe, and type with your keyboard. ⌘C / ⌘V share the clipboard both ways while it's open.<br>
+        The screen shows here, next to the camera. Click to tap, drag to swipe, scroll, and type with your keyboard; ⌘V types your Mac's clipboard into the phone.<br>
         The camera pauses while another app is in front on the phone, and picks up again when you go back to the phoneOnDesk tab.<br>
         Wireless debugging turns off if the phone restarts or changes Wi‑Fi. Turn it back on and it reconnects without pairing again.
       </div>
@@ -293,7 +292,15 @@ const phoneReady = (s) => s.tools && s.devices.some((d) => d.state === 'device')
 function renderDev(s) {
   const el = $('devState');
   if (!s.tools) {
-    el.innerHTML = 'Needs scrcpy on this Mac. In Terminal run <code>brew install scrcpy</code>, then reopen this.';
+    // adb comes from Google, so it's downloaded on request rather than bundled.
+    el.innerHTML = 'Seeing the phone\'s screen needs Android\'s own tools (adb), about 15 MB from Google. &nbsp; <button class="primary" id="installAdb">Download them</button>';
+    $('installAdb').onclick = async () => {
+      $('installAdb').disabled = true;
+      $('installAdb').textContent = 'Downloading…';
+      const r = await (await fetch('/adb/install', { method: 'POST' })).json();
+      toast(r.out);
+      renderDev(await adbState());
+    };
     $('pairSteps').hidden = true;
     return null;
   }
@@ -362,7 +369,6 @@ function startPhone() {
   video.start().catch((e) => video === phoneVideo && retry(e.message));
 }
 $('screenBtn').onclick = () => (phoneWanted ? closePhonePane() : openPhonePane());
-$('popOut').onclick = async () => toast((await (await fetch('/screen', { method: 'POST' })).json()).out);
 document.querySelectorAll('#phoneNav [data-key]').forEach((b) => (b.onclick = () => pressKey(KEY[b.dataset.key])));
 
 // Mouse → touch. Positions are in the phone's video pixels.
